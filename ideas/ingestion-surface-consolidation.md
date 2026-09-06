@@ -75,7 +75,12 @@ second defect:
 
 A client distinguishes "not implemented" from "your database is broken" by matching an error
 string. Changing that string in lcg silently reclassifies real failures. **Fix regardless of this
-proposal's outcome: return -32601 for an unknown method.**
+proposal's outcome: return -32601 for an unknown method — while preserving the existing
+`"Method not found: "` message text verbatim.** Changing the code and the string together would
+reclassify real failures for every client still substring-matching, across the whole window between
+the engine change and the client update (potentially more than one release). Code-only means the
+fix lands immediately with no client coordination at all, and is a prerequisite for §6's
+deprecation sequence rather than part of it.
 
 ## 5. Where the two modes cannot be equivalent
 
@@ -96,6 +101,14 @@ cannot distinguish "unchanged", "deleted", "still queued" and "re-addressed".
 
 No manifest protocol is needed up front, and the modes still converge on identical storage and
 extraction machinery, differing only in achievable quality and revision capability.
+
+**The asymmetry must be recorded on the data, not only in the API.** If chunk mode is
+append-only and document mode is revisable, the same content ingested two ways carries different
+temporal semantics, and a reader must be able to tell *which guarantee applied* to a given episode.
+Otherwise the absence of F from a later observation is uninterpretable, and derived belief is
+unsound on any mixed-mode graph. **[I]** The presence of a `revision_id` is the natural carrier —
+an episode with one was observed under a completeness claim, an episode without one was not — but
+that must be stated as the contract rather than left implicit in "document mode mints them."
 
 **[I] Against over-claiming:** document mode does **not** make chunk churn disappear. Measured over
 315 real revision pairs, 9.8% orphan at least one `chunk_id`, driven by heading renames — and since
@@ -143,9 +156,23 @@ Two chunkers that disagree is a new bug class. The resolution is to **not have t
 chunker canonical and have the preview UI call `knowledge_preview_chunks`. The app's local chunker
 is itself a rewrite-era workaround for a server capability that went missing.
 
-**[?]** Open: must the port be behaviour-identical (existing graphs keep their chunk boundaries), or
-is it free to differ and force a re-index? Identical means porting `mergeSmallSections` /
-`splitIntoSubBlocks` semantics exactly.
+**The fidelity question is downstream of a cheaper one: is a re-index additive or destructive?**
+
+- **Additive** — a new observation appended, prior episodes retained. Divergence is then cheap and
+  behaviour-identity is not worth paying for: the graph gains a revision and history survives, which
+  is what an episodic graph should do with a re-observation anyway.
+- **Destructive** — prior episodes replaced. This rewrites history for a reason unrelated to the
+  documents changing, contradicting the premise of the system. **[V]** It is also worse than it
+  looks, because extraction is nondeterministic — ADR-0284 states it directly: *"extraction is
+  nondeterministic, so re-running it on a byte-identical retry is not guaranteed to reproduce the
+  same entities/edges"*, which is precisely why #284's no-op path refuses to re-run extraction on
+  unchanged text. A destructive re-index would therefore silently produce **different facts from the
+  same documents**.
+
+So the port **need not be behaviour-identical, provided re-index is additive**. If it must be
+destructive, behaviour-identity becomes load-bearing and expensive. Price the re-index semantics
+first — it is the cheaper decision and it settles the other. **[?]** That ordering should come ahead
+of any mdast→comrak porting estimate.
 
 ## 8. Interactions with work in flight
 
@@ -153,9 +180,19 @@ is it free to differ and force a re-index? Identical means porting `mergeSmallSe
   degradation path bolted onto a chunk endpoint. #293's IPC cap becomes a document-size cap. The
   agreed `Episodic` provenance columns (`doc_id`, `chunk_id`, `unit_index`, `unit_count`,
   `chunk_version_hash`) become more natural, because in document mode the server mints them.
-- **0.15.0 (temporal).** **[I] May remove a protocol from that scope.** The revision-manifest design
-  exists to reconstruct completeness the wire destroys; document mode supplies it by construction.
-  Reconcile before either thread specs further.
+- **0.15.0 (temporal).** Reconciled with that thread (2026-09-06). The manifest has two jobs and
+  document mode does opposite things to them: **manifest-as-protocol dies** (no client-side manifest,
+  no unchanged-id negotiation — completeness arrives by construction), while
+  **manifest-as-record survives and strengthens** — "what did D consist of at T_i?" is still needed
+  for audit, for recomputing support, and for the *next* revision to diff against, and the server
+  now derives it from bytes it received rather than trusting a client cache. Two of that thread's
+  open questions close as a result: manifest authority settles on the graph rather than a client JSON
+  store (removing the `chunkState`-desync failure mode), and `revision_id` is minted by the **server**
+  rather than the client — the same "the party holding the bytes computes the identity" rule already
+  settled for `chunk_version_hash`. **SUPPORTS and the warrant generalisation are untouched**:
+  document mode changes how completeness arrives, not what supports a fact, and
+  `assert_relationship` / `add_cross_group_edge` / the merge and corrections paths do not come
+  through ingestion at all.
 - **#689 (contextual retrieval).** Stops being an architecture debate — in document mode the context
   is present, so Paths A/B/C/D collapse to an internal quality choice. Two findings carry over:
   `bge-base-en-v1.5`'s 512-token limit against `HARD_MAX_TOKENS = 2000` means chunks over ~412
@@ -180,4 +217,13 @@ is it free to differ and force a re-index? Identical means porting `mergeSmallSe
 2. Partial-failure semantics for document mode. (§9)
 3. Does `knowledge_entity_edge_analysis` have a purpose worth keeping? (§6)
 4. Non-markdown content: design the content-type seam now, or markdown-only with a fallback later?
-5. Does document mode obsolete the 0.15.0 revision manifest, or merely feed it? (§8)
+5. ~~Does document mode obsolete the 0.15.0 revision manifest, or merely feed it?~~ **Answered
+   (§8): it obsoletes the protocol and keeps the record.**
+6. **Mode transition — undefined and load-bearing.** A document first ingested in chunk mode
+   (append-only, no `revision_id`), later revised in document mode: the first document-mode ingest
+   finds episodes with no revision and nothing to supersede. Both available answers are bad — treat
+   it as a first observation and the chunk-mode episodes stay live forever (the orphaning problem
+   relocated, not solved), or adopt them into revision 1, which requires matching with only one
+   revision's information and so gains none of §5's "server chooses with full information"
+   advantage. **[I]** This is the realistic migration path for the liminis app itself, so it cannot
+   be deferred as an edge case.
