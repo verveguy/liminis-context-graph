@@ -103,14 +103,13 @@ pub struct Conn<'db> {
 /// must not wedge every other open.
 static OPEN_LOCK: Mutex<()> = Mutex::new(());
 
-/// Escapes a path for interpolation into `CALL home_directory='<path>'` (issue #559).
+/// Escapes a path for interpolation into `LOAD EXTENSION '<path>'` (issue #559).
 ///
 /// This is a deliberate, narrow exception to ADR-0024's bound-parameter convention, not a
-/// reversion of it: lbug's `CALL name='literal'` pragma syntax for global settings does not
-/// accept bound parameters at all (confirmed empirically — `CALL home_directory=$home` fails to
-/// prepare with "PARAMETER but LITERAL was expected", and the function-call form
-/// `CALL home_directory($home)` fails with "function home_directory does not exist"), unlike
-/// the table-function `CALL FOO(...)` forms used elsewhere in this file. Reuses the exact
+/// reversion of it: `LOAD EXTENSION` takes a literal path, not a bound parameter (mirroring the
+/// same constraint the now-abandoned `CALL home_directory='<path>'` mechanism had — see
+/// `lbug_extension_home`'s module doc for why that mechanism was replaced), unlike the
+/// table-function `CALL FOO(...)` forms used elsewhere in this file. Reuses the exact
 /// backslash-then-quote convention ADR-0022 documented before ADR-0024 superseded it, since that
 /// is lbug's own escape sequence, verified independently of this one call site. See ADR-0559.
 fn escape_cypher_string_literal(s: &str) -> String {
@@ -123,14 +122,14 @@ mod escape_cypher_string_literal_tests {
 
     /// FR-006: a path containing a single quote (an operator-supplied `LCG_LBUG_HOME`, or an
     /// unusual `current_exe()` install location) must not be able to break out of the
-    /// `CALL home_directory='<path>'` string literal.
+    /// `LOAD EXTENSION '<path>'` string literal.
     #[test]
     fn single_quote_does_not_break_out_of_the_string_literal() {
         let escaped = escape_cypher_string_literal("/tmp/o'brien's extensions");
         assert_eq!(escaped, "/tmp/o\\'brien\\'s extensions");
         // Reassembled into the same statement shape db.rs uses, the escaped quotes must not
         // terminate the literal early.
-        let statement = format!("CALL home_directory='{escaped}'");
+        let statement = format!("LOAD EXTENSION '{escaped}'");
         assert_eq!(
             statement.matches('\'').count(),
             4,
@@ -161,30 +160,43 @@ impl Db {
         // — running them in connect() races concurrent callers. The OPEN_LOCK
         // above additionally serializes this block across Databases.
         let setup_conn = lbug::Connection::new(&inner)?;
-        // Issue #559: point lbug at a pre-staged extension bundle (release-bundled or
-        // operator-provided) before INSTALL/LOAD EXTENSION run, so those statements resolve
-        // locally instead of downloading from extension.ladybugdb.com. No-op (falls through to
-        // lbug's existing default behavior) when neither a bundle nor an override is found —
-        // see lbug_extension_home::resolve_extension_home for the precedence order.
-        if let Some(extension_home) = crate::lbug_extension_home::resolve_extension_home()? {
-            // `to_string_lossy()` would silently replace invalid bytes, which could turn a
-            // non-UTF-8 path into a *different*, plausible-looking path that doesn't actually
-            // contain the staged bundle — pointing `home_directory` at the wrong place instead
-            // of failing loudly. The Cypher statement must be valid UTF-8 regardless, so reject
-            // up front instead of mangling.
-            let extension_home_str = extension_home.to_str().ok_or_else(|| {
-                Error::Config(format!(
-                    "resolved lbug extension home is not valid UTF-8: {}",
-                    extension_home.display()
-                ))
-            })?;
-            let escaped = escape_cypher_string_literal(extension_home_str);
-            let _ = setup_conn.query(&format!("CALL home_directory='{escaped}'"))?;
+        // Issue #559: load a pre-staged extension bundle (release-bundled or operator-provided)
+        // directly by absolute path, bypassing INSTALL (and its network download to
+        // extension.ladybugdb.com) entirely. Falls back to lbug's existing INSTALL-based default
+        // behavior when neither a bundle nor an override is found — see
+        // lbug_extension_home::resolve_extension_files for the precedence order.
+        //
+        // Deliberately NOT `CALL home_directory='<dir>'` + bare `INSTALL vector`/`LOAD EXTENSION
+        // vector`: that mechanism was tried first and caused silent row loss in an unrelated
+        // RELATES_TO dump/rebuild round trip whenever home_directory was redirected away from
+        // the process's real home directory — reproduced deterministically across macOS and
+        // Linux, isolated to the redirect itself (see issue #559's Validate-stage discussion).
+        // `LOAD EXTENSION '<absolute path>'` never touches home_directory at all: a filesystem
+        // path never equals lbug's OFFICIAL_EXTENSION table by exact string match, so
+        // ExtensionManager::loadExtension treats it as a USER (not OFFICIAL) extension and
+        // dlopen()s the given path directly.
+        if let Some(files) = crate::lbug_extension_home::resolve_extension_files()? {
+            for path in [&files.vector, &files.fts] {
+                // `to_string_lossy()` would silently replace invalid bytes, which could turn a
+                // non-UTF-8 path into a *different*, plausible-looking path that doesn't
+                // actually point at the staged file — failing to load it instead of failing
+                // loudly. The Cypher statement must be valid UTF-8 regardless, so reject up
+                // front instead of mangling.
+                let path_str = path.to_str().ok_or_else(|| {
+                    Error::Config(format!(
+                        "resolved lbug extension path is not valid UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                let escaped = escape_cypher_string_literal(path_str);
+                let _ = setup_conn.query(&format!("LOAD EXTENSION '{escaped}'"))?;
+            }
+        } else {
+            let _ = setup_conn.query("INSTALL vector")?;
+            let _ = setup_conn.query("LOAD EXTENSION vector")?;
+            let _ = setup_conn.query("INSTALL fts")?;
+            let _ = setup_conn.query("LOAD EXTENSION fts")?;
         }
-        let _ = setup_conn.query("INSTALL vector")?;
-        let _ = setup_conn.query("LOAD EXTENSION vector")?;
-        let _ = setup_conn.query("INSTALL fts")?;
-        let _ = setup_conn.query("LOAD EXTENSION fts")?;
         drop(setup_conn);
         Ok(Self {
             inner,

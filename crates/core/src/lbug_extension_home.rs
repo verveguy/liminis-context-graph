@@ -1,6 +1,18 @@
-//! Resolves the "extension home" directory `Db::open` should point lbug at before issuing
-//! `INSTALL vector` / `INSTALL fts`, so those statements resolve from pre-staged files instead
-//! of downloading from `extension.ladybugdb.com` (issue #559, ADR-0559).
+//! Resolves the absolute paths to pre-staged `vector`/`fts` extension files so `Db::open` can
+//! `LOAD EXTENSION '<path>'` directly, bypassing `INSTALL` (and its network download) entirely
+//! (issue #559, ADR-0559).
+//!
+//! An earlier version of this mechanism pointed lbug at a directory via
+//! `CALL home_directory='<dir>'` and let the existing `INSTALL`/`LOAD EXTENSION vector` (bare
+//! name) statements resolve locally. That was abandoned after issue #559's Validate stage found
+//! it caused silent row loss in an unrelated `RELATES_TO` dump/rebuild round trip whenever
+//! `home_directory` was redirected to any value other than the process's real home directory —
+//! reproduced deterministically, isolated to the redirect itself (not the extension bytes, not
+//! the avoided download, not the filesystem the redirect target lived on). Loading the extension
+//! by absolute path sidesteps `home_directory` entirely: `ExtensionManager::loadExtension`
+//! (vendored lbug C++) only special-cases a name that matches its `OFFICIAL_EXTENSION` table by
+//! exact string equality (`"VECTOR"`, `"FTS"`, ...) — a filesystem path never matches, so it
+//! `dlopen`s the given path directly and never touches `home_directory` or the CDN.
 
 use std::path::{Path, PathBuf};
 
@@ -51,7 +63,7 @@ const EXTENSION_NAMES: [&str; 2] = ["vector", "fts"];
 /// Empirically confirmed (issue #559 Research) against the three release targets configured
 /// in `Cargo.toml`'s `workspace.metadata.dist.targets`. Any other OS/arch combination
 /// (including Windows, not currently a release target) returns `None`, which makes
-/// `resolve_extension_home` a no-op there — falling straight through to lbug's own default
+/// `resolve_extension_files` a no-op there — falling straight through to lbug's own default
 /// behavior, same as if no bundle were found.
 fn platform_string() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -62,40 +74,53 @@ fn platform_string() -> Option<&'static str> {
     }
 }
 
+/// The two absolute file paths `Db::open` should `LOAD EXTENSION '<path>'` directly, bypassing
+/// `home_directory`/`INSTALL` entirely.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExtensionFiles {
+    pub(crate) vector: PathBuf,
+    pub(crate) fts: PathBuf,
+}
+
 /// Checks whether `root/.lbdb/extension/<LBUG_EXTENSION_VERSION>/<platform>/` is a usable
-/// candidate.
+/// candidate, returning the resolved file paths when it is.
 ///
 /// lbug's own `INSTALL` does not distinguish "this location was never staged" from "this
 /// location was staged incompletely" — it silently downloads whatever file is missing
-/// (confirmed empirically in issue #559 Research). Resolution here is therefore
-/// directory-level: if the versioned platform directory doesn't exist at all, this tier simply
-/// doesn't apply (`Ok(false)` — the caller falls through to the next precedence tier, exactly
-/// as if no bundle were present here, e.g. because the lbug pin has moved since this directory
-/// was staged). But once that directory exists, it's a chosen candidate, and a missing file
-/// inside it is a loud, actionable error (`Err`) rather than a silent fall-through that would
-/// let an operator's "offline" deployment reach the network unexpectedly.
-fn check_candidate(root: &Path, platform: &str) -> Result<bool, Error> {
+/// (confirmed empirically in issue #559 Research); loading a specific absolute path sidesteps
+/// that entirely, but this project's own resolution is still directory-level, for the same
+/// reason: if the versioned platform directory doesn't exist at all, this tier simply doesn't
+/// apply (`Ok(None)` — the caller falls through to the next precedence tier, exactly as if no
+/// bundle were present here, e.g. because the lbug pin has moved since this directory was
+/// staged). But once that directory exists, it's a chosen candidate, and a missing file inside
+/// it is a loud, actionable error (`Err`) rather than a silent fall-through that would let an
+/// operator's "offline" deployment reach the network unexpectedly.
+fn check_candidate(root: &Path, platform: &str) -> Result<Option<ExtensionFiles>, Error> {
     let versioned_dir = root
         .join(".lbdb")
         .join("extension")
         .join(extension_version())
         .join(platform);
     if !versioned_dir.is_dir() {
-        return Ok(false);
+        return Ok(None);
     }
 
+    let file_path = |name: &str| {
+        versioned_dir
+            .join(name)
+            .join(format!("lib{name}.lbug_extension"))
+    };
     let missing: Vec<PathBuf> = EXTENSION_NAMES
         .iter()
-        .map(|name| {
-            versioned_dir
-                .join(name)
-                .join(format!("lib{name}.lbug_extension"))
-        })
+        .map(|name| file_path(name))
         .filter(|file| !file.is_file())
         .collect();
 
     if missing.is_empty() {
-        Ok(true)
+        Ok(Some(ExtensionFiles {
+            vector: file_path("vector"),
+            fts: file_path("fts"),
+        }))
     } else {
         let missing_list = missing
             .iter()
@@ -110,37 +135,32 @@ fn check_candidate(root: &Path, platform: &str) -> Result<bool, Error> {
 }
 
 /// Core precedence walk, taking already-resolved root candidates so it's testable without
-/// depending on real env vars or `std::env::current_exe()`. `resolve_extension_home` is the
+/// depending on real env vars or `std::env::current_exe()`. `resolve_extension_files` is the
 /// production entry point that supplies those.
 fn resolve_from(
     env_root: Option<&Path>,
     exe_root: Option<&Path>,
     platform: &str,
-) -> Result<Option<PathBuf>, Error> {
+) -> Result<Option<ExtensionFiles>, Error> {
     for root in [env_root, exe_root].into_iter().flatten() {
-        if check_candidate(root, platform)? {
-            return Ok(Some(root.to_path_buf()));
+        if let Some(files) = check_candidate(root, platform)? {
+            return Ok(Some(files));
         }
     }
     Ok(None)
 }
 
-/// Resolves the "extension home" directory `Db::open` should pass to
-/// `CALL home_directory='<path>'` before issuing `INSTALL vector` / `INSTALL fts` (FR-001,
-/// FR-002), in precedence order:
+/// Resolves the absolute `libvector`/`libfts` `.lbug_extension` file paths `Db::open` should
+/// `LOAD EXTENSION '<path>'` directly (FR-001, FR-002), in precedence order:
 ///
 /// 1. `LCG_LBUG_HOME` env var override (Story 2) — the operator's escape hatch for a
 ///    non-standard layout.
 /// 2. A directory derived from `std::env::current_exe()`'s parent — the layout a release
 ///    archive bundles files under (Story 1, FR-004): the binary sits at the archive's top
 ///    level, with a `.lbdb/` sibling directory.
-/// 3. Neither resolves: `Ok(None)`. `Db::open` issues no `CALL home_directory=...` and lbug
-///    falls back to its own default (user home directory, download on demand) — Story 3,
-///    the required non-regression path.
-///
-/// Returns the *root* directory, not the deeper `.lbdb/extension/<version>/<platform>/` path —
-/// `home_directory` expects the root and lbug appends the rest itself.
-pub(crate) fn resolve_extension_home() -> Result<Option<PathBuf>, Error> {
+/// 3. Neither resolves: `Ok(None)`. `Db::open` falls back to lbug's own default (`INSTALL`,
+///    user home directory, download on demand) — Story 3, the required non-regression path.
+pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error> {
     let Some(platform) = platform_string() else {
         return Ok(None);
     };
@@ -184,6 +204,13 @@ mod tests {
         }
     }
 
+    fn versioned_dir(root: &Path, version: &str, platform: &str) -> PathBuf {
+        root.join(".lbdb")
+            .join("extension")
+            .join(version)
+            .join(platform)
+    }
+
     #[test]
     fn env_root_wins_over_exe_root_when_both_resolve() {
         let env_dir = tempfile::tempdir().unwrap();
@@ -193,7 +220,13 @@ mod tests {
 
         let resolved =
             resolve_from(Some(env_dir.path()), Some(exe_dir.path()), "linux_amd64").unwrap();
-        assert_eq!(resolved, Some(env_dir.path().to_path_buf()));
+        let expected_dir = versioned_dir(env_dir.path(), extension_version(), "linux_amd64");
+        let files = resolved.expect("expected env root to resolve");
+        assert_eq!(
+            files.vector,
+            expected_dir.join("vector/libvector.lbug_extension")
+        );
+        assert_eq!(files.fts, expected_dir.join("fts/libfts.lbug_extension"));
     }
 
     #[test]
@@ -202,7 +235,13 @@ mod tests {
         write_stub_bundle(exe_dir.path(), extension_version(), "linux_amd64");
 
         let resolved = resolve_from(None, Some(exe_dir.path()), "linux_amd64").unwrap();
-        assert_eq!(resolved, Some(exe_dir.path().to_path_buf()));
+        let expected_dir = versioned_dir(exe_dir.path(), extension_version(), "linux_amd64");
+        let files = resolved.expect("expected exe root to resolve");
+        assert_eq!(
+            files.vector,
+            expected_dir.join("vector/libvector.lbug_extension")
+        );
+        assert_eq!(files.fts, expected_dir.join("fts/libfts.lbug_extension"));
     }
 
     #[test]

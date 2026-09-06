@@ -34,43 +34,77 @@ if (vfs->fileOrPathExists(localLibFilePath) && !info.forceInstall) {
 }
 ```
 
-So pre-placing the two extension files under a directory this project controls, and pointing
-`home_directory` at it before the existing `INSTALL` statements run, is sufficient — no change is
-needed to those statements themselves.
+So pre-placing the two extension files under a directory this project controls is sufficient to
+avoid the download — the only remaining question is how to tell lbug where to find them.
+
+### A mechanism that was tried and abandoned: `CALL home_directory='<dir>'`
+
+The first implementation pre-placed the files under a directory, pointed `home_directory` at it
+with `CALL home_directory='<dir>'`, and let the existing `INSTALL vector`/`LOAD EXTENSION vector`
+(bare name) statements resolve locally — exactly the mechanism this issue's own spec proposed.
+This was abandoned during the Validate stage: it caused **silent row loss** in an unrelated
+`RELATES_TO` dump→rebuild round trip (`mcp_real_corpus_admin_data_e2e`), reproduced
+deterministically on both macOS and `linux/amd64` (Docker, matching CI). A methodical A/B
+narrowed the cause precisely:
+
+- Removing the redirect (falling back to lbug's own default resolution) always passed, whether
+  or not a network download actually occurred.
+- Redirecting `home_directory` to *any* value different from the process's real home directory
+  always failed — independent of which files were staged there, their exact bytes (byte-for-byte
+  identical to a fresh CDN fetch, confirmed via SHA-256), or which filesystem the target
+  directory lived on (`/tmp` and a plain subdirectory of the real `$HOME` both failed).
+- Redirecting `home_directory` to a value *equal to* the real home directory — i.e., issuing the
+  exact same `CALL home_directory=...` statement, exercising the exact same code path — always
+  passed.
+
+A full audit of every reference to `home_directory` in the vendored lbug 0.18.1 C++ source (both
+the `homeDirectory` field and the `"home_directory"` setting-name string) found only three
+consumers — extension-directory resolution, and two `~`-prefix `glob()`/`expandPath()` expansion
+sites — none of which explain data loss in an unrelated graph query. The mechanism is real and
+reproducible, but its root cause inside lbug was not found by static source review; it was
+reported upstream separately. This project does not depend on understanding *why* — it depends on
+not depending on `home_directory` at all, which the mechanism below achieves.
 
 ## Decision
 
-### Resolve an extension home directory, 3-tier precedence
+### Load extensions by absolute path, bypassing `home_directory`/`INSTALL` entirely
 
-Before issuing `INSTALL vector` / `INSTALL fts`, `Db::open` resolves an "extension home"
-directory (`crates/core/src/lbug_extension_home.rs`) in this order, using the first candidate
-that resolves to a directory containing both extension files:
+Before falling back to `INSTALL vector`/`INSTALL fts`, `Db::open` resolves the absolute paths to
+the two extension files (`crates/core/src/lbug_extension_home.rs`) in this order, using the first
+candidate whose versioned platform directory contains both files:
 
 1. **`LCG_LBUG_HOME`** — an explicit env var override, for an operator staging extensions at a
    non-standard location (a shared read-only mount, a custom packaging layout).
 2. **A directory derived from `std::env::current_exe()`'s parent** — the layout a release
    archive bundles files under: the binary sits at the archive's top level, with a `.lbdb/`
    sibling directory.
-3. **Neither resolves** — no new statement is issued, and lbug's existing default (download from
-   the CDN) applies unchanged. This is the required non-regression path for existing deployments
-   and for running from a `cargo build`/dev binary.
+3. **Neither resolves** — falls back unchanged to `INSTALL vector`/`LOAD EXTENSION vector`/
+   `INSTALL fts`/`LOAD EXTENSION fts` (lbug's own default: home directory, download on demand).
+   This is the required non-regression path for existing deployments and for running from a
+   `cargo build`/dev binary.
 
-Both tiers 1 and 2 resolve to the *root* directory `home_directory` itself expects — lbug appends
-`.lbdb/extension/<version>/<platform>/...` internally; `resolve_extension_home()` only checks
-that subtree exists before returning the root.
+When a candidate resolves, `Db::open` issues `LOAD EXTENSION '<absolute path>'` directly for each
+file — no `INSTALL`, no `CALL home_directory=...`. This works because
+`ExtensionManager::loadExtension` (vendored lbug C++) only takes the `INSTALL`-oriented,
+`home_directory`-dependent path when the given name matches its `OFFICIAL_EXTENSION` table by
+exact (case-insensitive) string equality (`"VECTOR"`, `"FTS"`, ...); a filesystem path never
+matches that table, so lbug treats it as a `USER` extension, `dlopen`s the exact path given, and
+never consults `home_directory` or the CDN. (Trade-off: this also skips
+`executeExtensionLoader`'s `_loader.lbug_extension` step, but neither `vector` nor `fts` ships
+one — confirmed both by what `INSTALL` itself downloads and by a direct CDN probe.)
 
 ### Directory-level resolution, with an explicit partial-bundle guard
 
-lbug's own `INSTALL` does not distinguish "never staged here" from "staged incompletely" — it
-silently downloads whatever single file is missing from an otherwise-existing `home_directory`
-(confirmed empirically against the pinned build). `resolve_extension_home()` therefore adds its
-own pre-check: if the versioned platform directory (`.lbdb/extension/<version>/<platform>/`)
-doesn't exist at all, this tier doesn't apply and resolution falls through to the next tier
-(this is also how **version drift** — the pin's `LBUG_EXTENSION_VERSION` no longer matching a
-previously-staged directory's version segment — resolves cleanly, with no special-case
-detection). But once that directory exists, a missing file inside it is a hard `Error::Config`,
-not a silent fall-through, so an operator's "offline" deployment cannot reach the network
-unexpectedly because half of a bundle failed to extract.
+Loading by absolute path means a missing file simply fails to load rather than silently
+downloading (the `INSTALL`-specific silent-fill behavior no longer applies at all) — but this
+project's own resolution is still directory-level, so an incomplete bundle is caught before
+either `LOAD EXTENSION` statement runs: if the versioned platform directory
+(`.lbdb/extension/<version>/<platform>/`) doesn't exist at all, this tier doesn't apply and
+resolution falls through to the next tier (this is also how **version drift** — the pin's
+`LBUG_EXTENSION_VERSION` no longer matching a previously-staged directory's version segment —
+resolves cleanly, with no special-case detection). But once that directory exists, a missing file
+inside it is a hard `Error::Config`, not a silent fall-through, so an operator's "offline"
+deployment cannot reach the network unexpectedly because half of a bundle failed to extract.
 
 ### `LBUG_EXTENSION_VERSION`: single-file source of truth, not derivable from `lbug::VERSION`
 
@@ -105,18 +139,19 @@ someone looked. That residual gap is inherent and accepted.
 ### A deliberate, narrow exception to ADR-0024's bound-parameter convention
 
 [ADR-0024](0024-bound-parameter-db-access.md) mandates bound `$name` parameters over Cypher-text
-interpolation project-wide, and lists `escape()` as deleted. `CALL home_directory=...` cannot
-follow that convention: confirmed empirically, `CALL home_directory=$home` fails to prepare
-(`Binder exception: $_0_ has type PARAMETER but LITERAL was expected`), and the function-call form
-`CALL home_directory($home)` also fails (`Catalog exception: function home_directory does not
-exist`). lbug's `CALL name='literal'` pragma syntax for global settings accepts only a literal,
-unlike the table-function `CALL FOO(..., $param)` forms already used elsewhere in `db.rs`.
+interpolation project-wide, and lists `escape()` as deleted. `LOAD EXTENSION '<path>'` cannot
+follow that convention — it takes a literal path, not a bound parameter, the same constraint the
+abandoned `CALL home_directory=...` mechanism had (confirmed empirically: `CALL
+home_directory=$home` fails to prepare with `Binder exception: $_0_ has type PARAMETER but
+LITERAL was expected`) — unlike the table-function `CALL FOO(..., $param)` forms already used
+elsewhere in `db.rs`.
 
 `escape_cypher_string_literal` (`crates/core/src/db.rs`) reintroduces exactly the backslash
 convention [ADR-0022](0022-lbug-cypher-escaping-convention.md) documented before ADR-0024
-superseded it (`\` → `\\`, then `'` → `\'`) — narrowly scoped to this one call site, with its own
-unit test for a single-quote-containing path (FR-006), and commented as a verified exception
-rather than a reversion.
+superseded it (`\` → `\\`, then `'` → `\'`) — narrowly scoped to this one call site (now applied
+to each resolved extension file path, twice per `Db::open`, rather than once to a directory
+root), with its own unit test for a single-quote-containing path (FR-006), and commented as a
+verified exception rather than a reversion.
 
 ### CI: one touchpoint, not seven
 
