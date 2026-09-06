@@ -97,6 +97,7 @@ async fn connect_live_embedder() -> Option<OaiEmbedder> {
 #[cfg(unix)]
 fn cfg_if_uds(path: &str) -> OaiEmbedder {
     OaiEmbedder::new_uds(path, FIXTURE_EMBEDDING_MODEL, embedding_dim())
+        .expect("valid embedder config")
 }
 
 #[cfg(not(unix))]
