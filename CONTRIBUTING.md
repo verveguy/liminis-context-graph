@@ -144,6 +144,11 @@ never commit release prep directly to `main` — then tag the merge commit.
      validate_recompute_matches_stored_vectors_for_real_corpus_wal
    ```
 
+   Run them **one at a time**, or pass `--test-threads=1` if running the whole file. The three
+   tests in it contend for CPU and for the single sidecar when run in parallel, which inflates
+   every timing — measured at ~20% on the no-recompute baseline. Correctness figures are
+   unaffected; only the timings are.
+
    **Confirm neither printed `[SKIP]`.** Do not verify the sidecar by checking that
    `/tmp/liminis-inference.sock` exists — a stale socket file left by a crashed sidecar still passes
    that check, while `connect_live_embedder()` probes the connection and skips when the probe fails.
@@ -151,7 +156,13 @@ never commit release prep directly to `main` — then tag the merge commit.
 
    What to check, against the figures measured on `29eafe2` (0.14.0 development):
 
-   - **Cold vs warm replay cost** — cold 153.0s / 4,106 real embedder calls, warm 49.1s / 0 calls.
+   - **Cold vs warm replay cost** — cold 153.0s, warm 49.1s / 0 real calls.
+     **The "real embedder calls" counter reports *batches*, not embeddings** — `batch_call_count()`.
+     Measured on `v0.14.0` (`9299252a`), the cold pass made **194** batch calls carrying 4,126
+     embeddings. Do not compare that counter against the 4,106 figure in the recompute-drift line
+     below: that one counts *distinct texts*, and reading it as a call count makes a healthy run
+     look like a 20x regression. (An earlier revision of this step recorded cold as "4,106 real
+     embedder calls", conflating the two.)
      The warm figure should land near the no-recompute baseline of ~49.9s, measured by this file's
      third test, `measure_replay_throughput_over_real_corpus_wal` (which needs no sidecar and can be
      run alongside for comparison). A warm figure well above it means the content-addressed cache has
@@ -165,6 +176,16 @@ never commit release prep directly to `main` — then tag the merge commit.
    claims, and only one of them belongs in a release. If a sidecar genuinely cannot be run for a given
    release, record that in the release PR rather than leaving the omission silent — the same standard
    step 0 applies to a red non-gating workflow.
+
+   Measured on **`v0.14.0` (`9299252a`)**, serially, against a verified-live sidecar — the first
+   run of these tests against a shipped tag:
+
+   | | v0.14.0 | `29eafe2` baseline |
+   |---|---|---|
+   | cold cache | 137.167s, 194 batch calls | 153.0s |
+   | warm cache | 47.816s, 0 real calls | 49.1s |
+   | no-recompute baseline | 49.514s, 252.1 mutations/s | ~49.9s |
+   | recompute drift | 1.000000 mean and min, all three kinds | 1.000000 |
 
    Background: both tests skipped through every stage of #526 — Specify, Implement and Validate — so
    its SC-001 and SC-005 success criteria shipped unmeasured. #460 was the same failure shape from the
