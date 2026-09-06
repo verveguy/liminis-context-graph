@@ -3593,6 +3593,69 @@ fn attributes_param_to_string(p: &Value) -> String {
     }
 }
 
+/// Resolves the target entity for `knowledge_assert_entity` and, if found, updates it in place
+/// (rename-collision guard + `update_entity_core` + WAL flush). Shared verbatim by both the
+/// pre-embed and post-embed resolution passes (issue #543 FR-003/FR-004/FR-008) so the
+/// rename-collision guard and `Merged`-forwarding walk can never drift apart between the two
+/// call sites. Returns `Some(uuid)` when an existing entity was resolved (and updated);
+/// `None` when no matching entity exists and the caller must create one.
+///
+/// `entity_uuid` is only ever `Some` on the first (pre-embed) pass — `resolve_entity_by_uuid`
+/// either finds the row or hard-errors, so a uuid-addressed call never reaches the "not found,
+/// go create one" branch and therefore never needs a second, post-embed pass.
+#[allow(clippy::too_many_arguments)]
+fn resolve_and_update_entity(
+    conn: &db::Conn<'_>,
+    state: &AppState,
+    group_id: &str,
+    gid_wal: &str,
+    entity_uuid: Option<&str>,
+    name: &str,
+    labels: &[String],
+    summary: &str,
+    attributes: &str,
+) -> Result<Option<String>, Error> {
+    let resolved = if let Some(eu) = entity_uuid {
+        Some(assert::resolve_entity_by_uuid(conn, group_id, eu)?)
+    } else {
+        match assert::resolve_entity_by_name(conn, group_id, name)? {
+            assert::Resolved::Existing(existing) => Some(*existing),
+            assert::Resolved::NotFound => None,
+        }
+    };
+
+    let Some(existing) = resolved else {
+        return Ok(None);
+    };
+
+    // Resolution (by uuid, or by name forwarded through a Merged tombstone) can land
+    // `existing` on an entity whose current name differs from the caller-supplied `name` — an
+    // implicit rename. Guard against that rename silently colliding with a *different active*
+    // entity already holding the target name in this group: `get_entity_by_name_ci`/
+    // `_with_scan_fallback` return one deterministic winner regardless of `Merged` status, so an
+    // unguarded rename could make one of two same-named active entities unreachable by future
+    // by-name resolution (including `knowledge_assert_relationship`'s endpoint resolution),
+    // undermining FR-011's "(name, group_id)" idempotency key. `count_active_entities_by_name_ci`
+    // excludes `Merged` tombstones (matching `cross_group::resolve_endpoint`'s own
+    // ambiguity-detection convention), so reusing a still-Merged tombstone's old name — as the
+    // by-name Merged-forwarding path routinely does — is correctly not treated as a collision.
+    // On the post-embed pass, this check runs against whatever exists *now*, so a collision that
+    // only came into being during the dropped-lock window (issue #543 edge case) is still caught.
+    if existing.name.trim().to_lowercase() != name.trim().to_lowercase()
+        && conn.count_active_entities_by_name_ci(name, group_id)? > 0
+    {
+        return Err(Error::Ipc(format!(
+            "cannot rename entity '{}' to '{name}': an active entity in group \
+             '{group_id}' already uses that name",
+            existing.uuid
+        )));
+    }
+    conn.update_entity_core(&existing, name, labels, summary, attributes)?;
+    let seq = wal_exec::wal_flush_ungrouped(state, gid_wal, conn.drain_mutations());
+    wal_exec::advance_wal_position(conn, gid_wal, seq, state);
+    Ok(Some(existing.uuid))
+}
+
 /// `knowledge_assert_entity` (issue #379): creates or updates a single entity identified by
 /// `name` (or, if `entity_uuid` is supplied, by that strict group-scoped UUID lookup — FR-007)
 /// within `group_id`. Resolution (including forward-through-`Merged` per FR-008/FR-009) is
@@ -3603,6 +3666,17 @@ fn attributes_param_to_string(p: &Value) -> String {
 /// `update_entity_core` never persists an embedding — see its doc comment. `summary` always
 /// fully replaces the prior value — a re-assert that omits it clears it, matching
 /// `attributes`/`labels`.
+///
+/// The create branch runs in two separately-guarded passes (issue #543): `write_lock` is held
+/// only for the pre-embed resolution and, symmetrically, only for the post-embed
+/// resolve-and-insert — never across the intervening `state.embedder.embed(...).await` calls.
+/// `write_lock` is the only thing preventing two concurrent creates of the same not-yet-existing
+/// `(name, group_id)` from both inserting, so the post-embed pass re-runs the exact same
+/// resolution (`resolve_and_update_entity`) under a freshly-acquired guard immediately before
+/// the insert: if a concurrent writer created or altered this entity while this call's lock was
+/// dropped for the embed, this call takes the update path against that row instead of inserting
+/// a duplicate (FR-003/FR-004/FR-006), and the just-computed embedding is simply discarded
+/// (FR-005 — the loser's response must be indistinguishable from an ordinary update).
 async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let name = p["name"]
@@ -3627,114 +3701,44 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
 
-    /// Outcome of the existence-resolution block: either the row already existed and was
-    /// updated in place (no embedding ever needed), or it must be created — in which case the
-    /// fields needed to build the new row are carried forward so the embedder can be called
-    /// exactly once per field, only on this branch (issue #444).
-    enum EntityAssertOutcome {
-        Updated {
-            uuid: String,
-        },
-        ToCreate {
-            name: String,
-            group_id: String,
-            labels: Vec<String>,
-            summary: String,
-            attributes: String,
-        },
-    }
-
     let db = load_db(&state)?;
-    let state_c = Arc::clone(&state);
     let gid_wal = group_id.clone();
-    // Held across both `spawn_blocking` sections below *and* the intervening
-    // `state.embedder.embed(...).await` calls on the create branch — not just around the DB
-    // work. This is required for correctness, not an oversight: `write_lock` is the only thing
-    // preventing two concurrent creates of the same not-yet-existing (name, group_id) from both
-    // resolving "not found" and both inserting, which would violate the upsert's uniqueness
-    // invariant (see `Db::connect`'s single-writer-instance doc comment). The tradeoff is that
-    // every create-path call now serializes unrelated writes for the duration of an embedder
-    // round-trip, where before this fix the embed ran unguarded; a narrower critical section
-    // (drop the guard during embed, then re-resolve under a freshly-acquired guard right before
-    // insert, falling back to update if another writer won the race) would recover that
-    // parallelism but was left as a follow-up rather than folded into this reordering.
-    let _guard = state.write_lock.write().await;
 
-    let db_resolve = Arc::clone(&db);
-    let state_resolve = Arc::clone(&state_c);
-    let gid_resolve = gid_wal.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let conn = db_resolve
-            .connect()
-            .map_err(|e| Error::Ipc(format!("db: {e}")))?;
+    // Pass 1: acquire the lock, resolve, and — if the entity already exists — update it in
+    // place and flush, all within this one guard's scope. The guard drops at the end of this
+    // block regardless of which branch `resolve_and_update_entity` took.
+    let pass1_uuid = {
+        let _guard = state.write_lock.write().await;
+        let db1 = Arc::clone(&db);
+        let state1 = Arc::clone(&state);
+        let gid1 = gid_wal.clone();
+        let group_id1 = group_id.clone();
+        let name1 = name.clone();
+        let labels1 = labels.clone();
+        let summary1 = summary.clone();
+        let attributes1 = attributes.clone();
+        let entity_uuid1 = entity_uuid.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db1.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            resolve_and_update_entity(
+                &conn,
+                &state1,
+                &group_id1,
+                &gid1,
+                entity_uuid1.as_deref(),
+                &name1,
+                &labels1,
+                &summary1,
+                &attributes1,
+            )
+        })
+        .await??
+    };
 
-        let resolved = if let Some(ref eu) = entity_uuid {
-            Some(assert::resolve_entity_by_uuid(&conn, &group_id, eu)?)
-        } else {
-            match assert::resolve_entity_by_name(&conn, &group_id, &name)? {
-                assert::Resolved::Existing(existing) => Some(*existing),
-                assert::Resolved::NotFound => None,
-            }
-        };
-
-        match resolved {
-            Some(existing) => {
-                // Resolution (by uuid, or by name forwarded through a Merged tombstone) can
-                // land `existing` on an entity whose current name differs from the
-                // caller-supplied `name` — an implicit rename. Guard against that rename
-                // silently colliding with a *different active* entity already holding the
-                // target name in this group: `get_entity_by_name_ci`/`_with_scan_fallback`
-                // return one deterministic winner regardless of `Merged` status, so an
-                // unguarded rename could make one of two same-named active entities
-                // unreachable by future by-name resolution (including
-                // `knowledge_assert_relationship`'s endpoint resolution), undermining FR-011's
-                // "(name, group_id)" idempotency key. `count_active_entities_by_name_ci`
-                // excludes `Merged` tombstones (matching `cross_group::resolve_endpoint`'s own
-                // ambiguity-detection convention), so reusing a still-Merged tombstone's old
-                // name — as the by-name Merged-forwarding path routinely does — is correctly
-                // not treated as a collision.
-                if existing.name.trim().to_lowercase() != name.trim().to_lowercase()
-                    && conn.count_active_entities_by_name_ci(&name, &group_id)? > 0
-                {
-                    return Err(Error::Ipc(format!(
-                        "cannot rename entity '{}' to '{name}': an active entity in group \
-                         '{group_id}' already uses that name",
-                        existing.uuid
-                    )));
-                }
-                conn.update_entity_core(&existing, &name, &labels, &summary, &attributes)?;
-                let seq = wal_exec::wal_flush_ungrouped(
-                    &state_resolve,
-                    &gid_resolve,
-                    conn.drain_mutations(),
-                );
-                wal_exec::advance_wal_position(&conn, &gid_resolve, seq, &state_resolve);
-                Ok::<_, Error>(EntityAssertOutcome::Updated {
-                    uuid: existing.uuid,
-                })
-            }
-            // Nothing was mutated on this branch, so there is nothing to flush — the embedder
-            // (async) runs next, then a second blocking section performs the insert + flush.
-            None => Ok(EntityAssertOutcome::ToCreate {
-                name,
-                group_id,
-                labels,
-                summary,
-                attributes,
-            }),
-        }
-    })
-    .await??;
-
-    let (entity_uuid_out, created, name_embed_err, summary_embed_err) = match outcome {
-        EntityAssertOutcome::Updated { uuid } => (uuid, false, None, None),
-        EntityAssertOutcome::ToCreate {
-            name,
-            group_id,
-            labels,
-            summary,
-            attributes,
-        } => {
+    let (entity_uuid_out, created, name_embed_err, summary_embed_err) = match pass1_uuid {
+        Some(uuid) => (uuid, false, None, None),
+        None => {
+            // Not found on Pass 1 — compute the embedding(s) with no lock held (FR-001).
             let (name_embedding, name_embed_err) = match state.embedder.embed(&name).await {
                 Ok(v) => (v, None),
                 // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
@@ -3758,32 +3762,70 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                 }
             };
 
-            let uuid = tokio::task::spawn_blocking(move || {
-                let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            // Pass 2: re-acquire the lock and re-resolve from scratch (FR-003) — a concurrent
+            // writer may have created or altered this exact `(name, group_id)` while the lock
+            // was dropped for the embed above. `entity_uuid` is never re-supplied here: Pass 1
+            // only reaches this branch via the by-name resolution path (see
+            // `resolve_and_update_entity`'s doc comment).
+            let _guard = state.write_lock.write().await;
+            let db2 = Arc::clone(&db);
+            let state2 = Arc::clone(&state);
+            let gid2 = gid_wal.clone();
+            let group_id2 = group_id.clone();
+            let name2 = name.clone();
+            let labels2 = labels.clone();
+            let summary2 = summary.clone();
+            let attributes2 = attributes.clone();
+            let (uuid, race_created) = tokio::task::spawn_blocking(move || {
+                let conn = db2.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+                if let Some(uuid) = resolve_and_update_entity(
+                    &conn,
+                    &state2,
+                    &group_id2,
+                    &gid2,
+                    None,
+                    &name2,
+                    &labels2,
+                    &summary2,
+                    &attributes2,
+                )? {
+                    // Lost the race: a concurrent writer created or altered this entity while
+                    // this call's lock was dropped for the embed. Take the update path against
+                    // it (FR-004/FR-006) — the just-computed embedding above is discarded.
+                    return Ok::<_, Error>((uuid, false));
+                }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let row = EntityRow {
                     uuid: Uuid::new_v4().to_string(),
-                    name,
-                    group_id,
-                    labels,
+                    name: name2,
+                    group_id: group_id2,
+                    labels: labels2,
                     created_at: ts,
                     name_embedding,
-                    summary,
-                    attributes,
+                    summary: summary2,
+                    attributes: attributes2,
                     episode_uuids: vec![],
                     source_descriptions: vec![],
                     summary_embedding,
                 };
                 conn.insert_entity(&row)?;
-                let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-                wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
-                Ok::<_, Error>(row.uuid)
+                let seq = wal_exec::wal_flush_ungrouped(&state2, &gid2, conn.drain_mutations());
+                wal_exec::advance_wal_position(&conn, &gid2, seq, &state2);
+                Ok::<_, Error>((row.uuid, true))
             })
             .await??;
-            (uuid, true, name_embed_err, summary_embed_err)
+            drop(_guard);
+
+            if race_created {
+                (uuid, true, name_embed_err, summary_embed_err)
+            } else {
+                // FR-005: the loser's response must be indistinguishable from an ordinary
+                // update, so the (possibly failed) embed from above is not surfaced as a
+                // warning.
+                (uuid, false, None, None)
+            }
         }
     };
-    drop(_guard);
 
     // The embedder is only ever called on the create branch above, so an embed error can only
     // ever coincide with `created == true` — there is no "left unchanged" case to report.
@@ -3807,6 +3849,57 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     }))
 }
 
+/// Resolves the target edge for `knowledge_assert_relationship` by its endpoint UUIDs and, if
+/// found, updates it in place (`update_relates_to_core` + WAL flush). Shared verbatim by both
+/// the pre-embed and post-embed resolution passes (issue #543 FR-003/FR-004) so the two call
+/// sites can never drift apart.
+///
+/// Before checking for an existing edge, re-resolves `source_uuid`/`target_uuid` through
+/// `assert::resolve_entity_by_uuid` — a no-op unless an endpoint has since been merged into
+/// another entity (`knowledge_merge_entities`, which also takes `write_lock`), in which case it
+/// forwards through the `Merged` chain to the current canonical uuid, exactly like every other
+/// by-name/by-uuid resolution path in this codebase. This matters specifically on the post-embed
+/// pass: pre-#543, `write_lock` was held continuously from endpoint resolution through the
+/// insert, so a concurrent merge of an endpoint was structurally impossible (`merge_entities`
+/// itself needs the same lock). Narrowing the critical section opened a real window — the width
+/// of the embedder round trip — in which a merge can tombstone an endpoint (add the `Merged`
+/// label; the row and its uuid are not deleted) before this pass re-acquires the lock.
+/// `insert_relates_to_edge`'s `MATCH (src:Entity {uuid: $src})` does not filter out `Merged`
+/// nodes, so without this re-resolution step a newly created edge could silently attach to a
+/// stale, tombstoned endpoint instead of the canonical entity a caller resolving the same name
+/// fresh would land on (review finding on the initial version of this PR).
+///
+/// Returns `(existing_edge_uuid, canonical_source_uuid, canonical_target_uuid)` — `Some(uuid)`
+/// when an active matching edge was resolved (and updated) against the *canonical* endpoints;
+/// `None` when no matching edge exists and the caller must create one, using the returned
+/// canonical uuids rather than the ones originally passed in.
+#[allow(clippy::too_many_arguments)]
+fn resolve_and_update_edge(
+    conn: &db::Conn<'_>,
+    state: &AppState,
+    group_id: &str,
+    gid_wal: &str,
+    source_uuid: &str,
+    target_uuid: &str,
+    predicate: &str,
+    fact: &str,
+    valid_at: Option<&str>,
+    relation_type: Option<&str>,
+    attributes: &str,
+) -> Result<(Option<String>, String, String), Error> {
+    let source_uuid = assert::resolve_entity_by_uuid(conn, group_id, source_uuid)?.uuid;
+    let target_uuid = assert::resolve_entity_by_uuid(conn, group_id, target_uuid)?.uuid;
+    let Some(uuid) =
+        conn.find_active_relates_to_uuid(&source_uuid, &target_uuid, predicate, group_id)?
+    else {
+        return Ok((None, source_uuid, target_uuid));
+    };
+    conn.update_relates_to_core(&uuid, fact, valid_at, relation_type, attributes)?;
+    let seq = wal_exec::wal_flush_ungrouped(state, gid_wal, conn.drain_mutations());
+    wal_exec::advance_wal_position(conn, gid_wal, seq, state);
+    Ok((Some(uuid), source_uuid, target_uuid))
+}
+
 /// `knowledge_assert_relationship` (issue #379): creates or updates a single directed edge
 /// between two entities resolved by name — strictly within the call's own `group_id`
 /// (FR-013/FR-014), never falling back to a cross-group search — naming
@@ -3818,6 +3911,18 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
 /// and normalized before any write (FR-022). Existence is resolved *before* any embedding is
 /// computed (issue #444): the embedder is only ever called on the branch that creates a new
 /// edge, since `update_relates_to_core` never persists an embedding — see its doc comment.
+///
+/// The create branch runs in two separately-guarded passes (issue #543), mirroring
+/// `handle_assert_entity`: `write_lock` is held only for the pre-embed endpoint
+/// resolution/edge-lookup and, symmetrically, only for the post-embed resolve-and-insert —
+/// never across the intervening `state.embedder.embed(&fact).await` call. The post-embed pass
+/// re-runs `resolve_and_update_edge` under a freshly-acquired guard immediately before the
+/// insert, using the endpoint UUIDs resolved in Pass 1 as a starting point but re-canonicalizing
+/// them (see that function's doc comment) in case either endpoint was merged into another entity
+/// while the lock was dropped: if a concurrent writer created this exact edge (against the
+/// canonical endpoints) while this call's lock was dropped for the embed, this call takes the
+/// update path against that row instead of inserting a duplicate (FR-003/FR-004/FR-006),
+/// discarding the just-computed embedding (FR-005).
 async fn handle_assert_relationship(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -3854,98 +3959,90 @@ async fn handle_assert_relationship(
         None => None,
     };
 
-    /// Outcome of the existence-resolution block: either an active matching edge already
-    /// existed and was updated in place (no embedding ever needed), or it must be created — in
-    /// which case the fields needed to build the new edge are carried forward so the embedder
-    /// is called exactly once, only on this branch (issue #444).
-    enum EdgeAssertOutcome {
-        Updated {
-            uuid: String,
-        },
-        ToCreate {
-            source_uuid: String,
-            target_uuid: String,
-            predicate: String,
-            group_id: String,
-            fact: String,
-            valid_at: Option<String>,
-            relation_type: Option<String>,
-            attributes: String,
-        },
+    let db = load_db(&state)?;
+    let gid_wal = group_id.clone();
+
+    /// Fields carried from Pass 1 to Pass 2 when no active edge was found — everything needed
+    /// to re-check and, if the check still comes up empty, build the new edge.
+    struct ToCreate {
+        source_uuid: String,
+        target_uuid: String,
+        predicate: String,
+        group_id: String,
+        fact: String,
+        valid_at: Option<String>,
+        relation_type: Option<String>,
+        attributes: String,
     }
 
-    let db = load_db(&state)?;
-    let state_c = Arc::clone(&state);
-    let gid_wal = group_id.clone();
-    // See the matching comment in `handle_assert_entity`: held across both `spawn_blocking`
-    // sections and the create branch's `state.embedder.embed(...).await`, which is required to
-    // keep concurrent creates of the same not-yet-existing edge from both resolving "not found"
-    // and both inserting. Same known tradeoff (serializes unrelated writes for the duration of
-    // an embedder round-trip on create); a narrower critical section is a possible follow-up,
-    // not folded into this reordering.
-    let _guard = state.write_lock.write().await;
+    // Pass 1: acquire the lock, resolve both endpoints and the edge, and — if an active
+    // matching edge already exists — update it in place and flush, all within this one guard's
+    // scope. The guard drops at the end of this block regardless of which branch was taken.
+    let pass1 = {
+        let _guard = state.write_lock.write().await;
+        let db1 = Arc::clone(&db);
+        let state1 = Arc::clone(&state);
+        let gid1 = gid_wal.clone();
+        let group_id1 = group_id.clone();
+        let source_name1 = source_name.clone();
+        let target_name1 = target_name.clone();
+        let predicate1 = predicate.clone();
+        let fact1 = fact.clone();
+        let valid_at1 = valid_at.clone();
+        let relation_type1 = relation_type.clone();
+        let attributes1 = attributes.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db1.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
 
-    let db_resolve = Arc::clone(&db);
-    let state_resolve = Arc::clone(&state_c);
-    let gid_resolve = gid_wal.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let conn = db_resolve
-            .connect()
-            .map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            let resolve_or_err = |n: &str| -> Result<EntityRow, Error> {
+                match assert::resolve_entity_by_name(&conn, &group_id1, n)? {
+                    assert::Resolved::Existing(existing) => Ok(*existing),
+                    assert::Resolved::NotFound => Err(Error::Ipc(format!(
+                        "'{n}' does not exist in group '{group_id1}' — \
+                         knowledge_assert_relationship only resolves endpoints within its own \
+                         group_id and never falls back to a cross-group search; use \
+                         knowledge_add_cross_group_edge to connect entities across groups"
+                    ))),
+                }
+            };
+            let source = resolve_or_err(&source_name1)?;
+            let target = resolve_or_err(&target_name1)?;
 
-        let resolve_or_err = |n: &str| -> Result<EntityRow, Error> {
-            match assert::resolve_entity_by_name(&conn, &group_id, n)? {
-                assert::Resolved::Existing(existing) => Ok(*existing),
-                assert::Resolved::NotFound => Err(Error::Ipc(format!(
-                    "'{n}' does not exist in group '{group_id}' — \
-                     knowledge_assert_relationship only resolves endpoints within its own \
-                     group_id and never falls back to a cross-group search; use \
-                     knowledge_add_cross_group_edge to connect entities across groups"
-                ))),
-            }
-        };
-        let source = resolve_or_err(&source_name)?;
-        let target = resolve_or_err(&target_name)?;
-
-        let existing_uuid =
-            conn.find_active_relates_to_uuid(&source.uuid, &target.uuid, &predicate, &group_id)?;
-
-        match existing_uuid {
-            Some(uuid) => {
-                conn.update_relates_to_core(
-                    &uuid,
-                    &fact,
-                    valid_at.as_deref(),
-                    relation_type.as_deref(),
-                    &attributes,
-                )?;
-                let seq = wal_exec::wal_flush_ungrouped(
-                    &state_resolve,
-                    &gid_resolve,
-                    conn.drain_mutations(),
-                );
-                wal_exec::advance_wal_position(&conn, &gid_resolve, seq, &state_resolve);
-                Ok::<_, Error>(EdgeAssertOutcome::Updated { uuid })
+            let (existing, source_uuid, target_uuid) = resolve_and_update_edge(
+                &conn,
+                &state1,
+                &group_id1,
+                &gid1,
+                &source.uuid,
+                &target.uuid,
+                &predicate1,
+                &fact1,
+                valid_at1.as_deref(),
+                relation_type1.as_deref(),
+                &attributes1,
+            )?;
+            if let Some(uuid) = existing {
+                return Ok::<_, Error>(Ok(uuid));
             }
             // Nothing was mutated on this branch, so there is nothing to flush — the embedder
-            // (async) runs next, then a second blocking section performs the insert + flush.
-            None => Ok(EdgeAssertOutcome::ToCreate {
-                source_uuid: source.uuid,
-                target_uuid: target.uuid,
-                predicate,
-                group_id,
-                fact,
-                valid_at,
-                relation_type,
-                attributes,
-            }),
-        }
-    })
-    .await??;
+            // (async) runs next, then a second, freshly-guarded pass re-checks and inserts.
+            Ok(Err(ToCreate {
+                source_uuid,
+                target_uuid,
+                predicate: predicate1,
+                group_id: group_id1,
+                fact: fact1,
+                valid_at: valid_at1,
+                relation_type: relation_type1,
+                attributes: attributes1,
+            }))
+        })
+        .await??
+    };
 
-    let (edge_uuid, created, embed_err) = match outcome {
-        EdgeAssertOutcome::Updated { uuid } => (uuid, false, None),
-        EdgeAssertOutcome::ToCreate {
+    let (edge_uuid, created, embed_err) = match pass1 {
+        Ok(uuid) => (uuid, false, None),
+        Err(ToCreate {
             source_uuid,
             target_uuid,
             predicate,
@@ -3954,7 +4051,8 @@ async fn handle_assert_relationship(
             valid_at,
             relation_type,
             attributes,
-        } => {
+        }) => {
+            // Not found on Pass 1 — compute the embedding with no lock held (FR-002).
             let (fact_embedding, embed_err) = match state.embedder.embed(&fact).await {
                 Ok(v) => (v, None),
                 // RelatesToNode_.fact_embedding is a fixed-size FLOAT[N] column, so a
@@ -3963,35 +4061,81 @@ async fn handle_assert_relationship(
                 Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
             };
 
-            let uuid = tokio::task::spawn_blocking(move || {
-                let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            // Pass 2: re-acquire the lock and re-check the edge identity tuple (FR-003) using
+            // the endpoint UUIDs resolved in Pass 1 — a concurrent writer may have created this
+            // exact edge, or merged one of its endpoints into another entity, while the lock was
+            // dropped for the embed above. `resolve_and_update_edge` re-canonicalizes both
+            // endpoints before checking, so a mid-race merge is forwarded correctly rather than
+            // silently attaching the new edge to a tombstoned entity.
+            let _guard = state.write_lock.write().await;
+            let db2 = Arc::clone(&db);
+            let state2 = Arc::clone(&state);
+            let gid2 = gid_wal.clone();
+            let group_id2 = group_id.clone();
+            let predicate2 = predicate.clone();
+            let fact2 = fact.clone();
+            let valid_at2 = valid_at.clone();
+            let relation_type2 = relation_type.clone();
+            let attributes2 = attributes.clone();
+            let source_uuid2 = source_uuid.clone();
+            let target_uuid2 = target_uuid.clone();
+            let (uuid, race_created) = tokio::task::spawn_blocking(move || {
+                let conn = db2.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+                let (existing, source_uuid2, target_uuid2) = resolve_and_update_edge(
+                    &conn,
+                    &state2,
+                    &group_id2,
+                    &gid2,
+                    &source_uuid2,
+                    &target_uuid2,
+                    &predicate2,
+                    &fact2,
+                    valid_at2.as_deref(),
+                    relation_type2.as_deref(),
+                    &attributes2,
+                )?;
+                if let Some(uuid) = existing {
+                    // Lost the race: a concurrent writer created this edge (against the
+                    // canonical endpoints) while this call's lock was dropped for the embed.
+                    // Take the update path against it (FR-004/FR-006) — the just-computed
+                    // embedding above is discarded.
+                    return Ok::<_, Error>((uuid, false));
+                }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let edge = RelatesToEdge {
                     uuid: Uuid::new_v4().to_string(),
-                    name: predicate,
-                    source_node_uuid: source_uuid,
-                    target_node_uuid: target_uuid,
-                    group_id,
-                    fact,
+                    name: predicate2,
+                    source_node_uuid: source_uuid2,
+                    target_node_uuid: target_uuid2,
+                    group_id: group_id2,
+                    fact: fact2,
                     fact_embedding,
                     created_at: ts,
-                    valid_at,
+                    valid_at: valid_at2,
                     invalid_at: None,
-                    attributes,
-                    relation_type,
+                    attributes: attributes2,
+                    relation_type: relation_type2,
                     episode_uuids: vec![],
                     source_descriptions: vec![],
                 };
                 conn.insert_relates_to_edge(&edge)?;
-                let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-                wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
-                Ok::<_, Error>(edge.uuid)
+                let seq = wal_exec::wal_flush_ungrouped(&state2, &gid2, conn.drain_mutations());
+                wal_exec::advance_wal_position(&conn, &gid2, seq, &state2);
+                Ok::<_, Error>((edge.uuid, true))
             })
             .await??;
-            (uuid, true, embed_err)
+            drop(_guard);
+
+            if race_created {
+                (uuid, true, embed_err)
+            } else {
+                // FR-005: the loser's response must be indistinguishable from an ordinary
+                // update, so the (possibly failed) embed from above is not surfaced as a
+                // warning.
+                (uuid, false, None)
+            }
         }
     };
-    drop(_guard);
 
     // The embedder is only ever called on the create branch above, so an embed error can only
     // ever coincide with `created == true` — there is no "left unchanged" case to report.

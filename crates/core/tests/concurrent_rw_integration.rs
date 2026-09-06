@@ -3,22 +3,27 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
+use futures::future::BoxFuture;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
+    corrections::{self, MergeEntitiesParams},
     db::Db,
     dedup_adapter::{DedupAdapter, PassthroughDedupAdapter},
     embedder::{MockEmbedder, OaiEmbedder},
     episode,
+    error::Error,
     extractor::{AnthropicExtractor, ExtractOptions, Extractor, MockExtractor},
     handlers,
     ipc::IpcRequest,
     llm_router::LlmRouter,
     telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink},
     types::{EntityRow, ExtractedEntity, SourceType},
+    Embedder,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -277,14 +282,14 @@ fn ipc_req(id: i64, method: &str, params: Value) -> IpcRequest {
     }
 }
 
-/// Acceptance Scenario 1 / SC-001: `handle_assert_entity`'s create path calls `embed()` while
-/// holding `state.write_lock` (issue #487). Before #510's fix, an embedder that accepts a
-/// connection and never responds would hold that lock forever, wedging every other write on the
-/// instance. With the fix, the embed call fails within the configured timeout, the create
-/// falls back to a zero-vector embedding (existing embedder-unavailable behavior — the overall
-/// `knowledge_assert_entity` call still succeeds, with `embedding_warning` populated), and the
-/// lock is released — so a concurrent write against a *different*, pre-existing entity on the
-/// same `AppState` is not blocked beyond that bound.
+/// Acceptance Scenario 1 / SC-001: originally (#487) `handle_assert_entity`'s create path called
+/// `embed()` while holding `state.write_lock`, so an embedder that accepts a connection and
+/// never responds would hold that lock until the embed's configured timeout fired (#510) —
+/// bounding, but not eliminating, the stall. Issue #543 removed the hold entirely: the create
+/// path never holds `write_lock` across the embedder round trip at all (it re-acquires the lock
+/// and re-resolves immediately before the insert instead), so a concurrent write against a
+/// *different*, pre-existing entity on the same `AppState` now completes essentially immediately
+/// — not merely "within the ~300ms embed timeout bound" as it did pre-#543.
 ///
 /// This test and its UDS counterpart below
 /// (`hung_uds_embedder_on_create_path_releases_write_lock_for_concurrent_write`, #541) are the
@@ -399,17 +404,24 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
         .await
     });
 
+    // Await the concurrent update *first* and measure its elapsed time immediately — both tasks
+    // run independently in the background regardless of await order, but awaiting `create_task`
+    // first (which, post-#543, spends ~600ms sequentially timing out both the name and summary
+    // embeds) before measuring `update_elapsed` would fold that unrelated wait into the
+    // measurement and defeat the point of this assertion, even though the update itself finished
+    // long before the create call did.
+    let update_resp = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
+        .await
+        .expect("concurrent update must not hang indefinitely — write_lock was not released")
+        .unwrap();
+    let update_elapsed = start_update.elapsed();
+
     // Neither call should ever hang indefinitely; this outer bound only guards the test itself
     // against a true regression (the whole point being disproven), not the feature's own bound.
     let create_resp = tokio::time::timeout(std::time::Duration::from_secs(10), create_task)
         .await
         .expect("create call must not hang indefinitely — write_lock was not released")
         .unwrap();
-    let update_resp = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
-        .await
-        .expect("concurrent update must not hang indefinitely — write_lock was not released")
-        .unwrap();
-    let update_elapsed = start_update.elapsed();
 
     let create_val = serde_json::to_value(create_resp).unwrap();
     assert!(
@@ -431,13 +443,18 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
     assert_eq!(update_val["result"]["created"], false);
     assert_eq!(update_val["result"]["entity_uuid"], "existing-uuid");
 
-    // The decisive assertion: the update, which never touches the embedder, must complete
-    // shortly after the create releases the lock (~300ms embed timeout + margin) — not after
-    // some unbounded wait, which is what issue #510 describes.
+    // The decisive assertion (tightened by issue #543): since the create path no longer holds
+    // `write_lock` across the embed call at all, the concurrent update must complete well before
+    // the hung embedder's sequential name+summary timeouts (~600ms total) even finish — not
+    // merely "bounded by" them, which was the best pre-#543 code could promise. 500ms leaves CI
+    // scheduling headroom while still clearly separating "lock never held across embed" from the
+    // pre-#543 regression this test would otherwise fail to catch (review feedback: 250ms was
+    // too tight relative to CI variance).
     assert!(
-        update_elapsed < std::time::Duration::from_secs(5),
-        "concurrent update took {update_elapsed:?} — write_lock was held far longer than the \
-         ~300ms embed timeout bound, suggesting it was not released promptly"
+        update_elapsed < std::time::Duration::from_millis(500),
+        "concurrent update took {update_elapsed:?} — expected it to complete well before the \
+         hung embedder's sequential ~600ms of timeouts, since write_lock is never held across \
+         the embed call after issue #543"
     );
 }
 
@@ -573,5 +590,569 @@ async fn hung_uds_embedder_on_create_path_releases_write_lock_for_concurrent_wri
         update_elapsed < std::time::Duration::from_secs(5),
         "concurrent update took {update_elapsed:?} — write_lock was held far longer than the \
          ~300ms embed timeout bound, suggesting it was not released promptly"
+    );
+}
+
+// ── Test 5: narrowed write_lock around the embedder round trip (issue #543) ───────
+
+/// Test embedder whose `embed()` blocks on a shared `tokio::sync::Barrier` until exactly
+/// `parties` concurrent callers have all called it — forcing a deterministic interleaving where
+/// every racing caller's Pass 1 (pre-embed resolution) has definitely completed before any of
+/// them proceeds to Pass 2 (post-embed re-resolution/insert), rather than relying on
+/// `sleep`-based timing that could flake under load (per issue #543 Research's flagged risk).
+struct BarrierEmbedder {
+    dim: usize,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+impl Embedder for BarrierEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        let barrier = Arc::clone(&self.barrier);
+        let dim = self.dim;
+        Box::pin(async move {
+            barrier.wait().await;
+            Ok(vec![0.0f32; dim])
+        })
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+/// Test embedder whose `embed()` sleeps for a fixed, configurable delay before succeeding —
+/// unlike the hung-forever stub server above, this always completes; it models a slow but
+/// healthy embedder (FR-012/SC-001), not a degraded one. Signals `started` the instant it's
+/// entered so a test can deterministically wait for the create call to have reached its
+/// lock-free embed phase (Pass 1 already resolved and dropped the guard) instead of guessing
+/// with a fixed sleep, which review feedback flagged as a source of CI flakiness under load.
+struct DelayEmbedder {
+    dim: usize,
+    delay: Duration,
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Embedder for DelayEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        let dim = self.dim;
+        let delay = self.delay;
+        let started = Arc::clone(&self.started);
+        Box::pin(async move {
+            started.notify_one();
+            tokio::time::sleep(delay).await;
+            Ok(vec![0.0f32; dim])
+        })
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+/// Test embedder whose `embed()` signals `started` the instant it's entered, then blocks until
+/// `proceed` is signaled — lets a test inject a concurrent write into the exact window between
+/// Pass 1 dropping `write_lock` and Pass 2 re-acquiring it (issue #543's Acceptance Scenario 2,
+/// third bullet).
+struct PausableEmbedder {
+    dim: usize,
+    started: Arc<tokio::sync::Notify>,
+    proceed: Arc<tokio::sync::Notify>,
+}
+
+impl Embedder for PausableEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        let dim = self.dim;
+        let started = Arc::clone(&self.started);
+        let proceed = Arc::clone(&self.proceed);
+        Box::pin(async move {
+            started.notify_one();
+            proceed.notified().await;
+            Ok(vec![0.0f32; dim])
+        })
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+/// FR-010/SC-002: two concurrent `knowledge_assert_entity` calls racing to create the identical
+/// not-yet-existing `(name, group_id)` must yield exactly one created row — the loser resolves
+/// via the update path against the winner's row, with no error and no duplicate. Uses
+/// `BarrierEmbedder` to force both calls' embed round trips to overlap deterministically.
+#[tokio::test]
+async fn assert_entity_concurrent_creates_of_same_identity_yield_one_row() {
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    let db_check = Arc::clone(&db);
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let embedder: Arc<dyn Embedder> = Arc::new(BarrierEmbedder { dim, barrier });
+    let state = make_state_with_embedder(db, embedder);
+
+    let mut tasks = Vec::new();
+    for id in 1..=2 {
+        let state = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            handlers::dispatch(
+                ipc_req(
+                    id,
+                    "knowledge_assert_entity",
+                    json!({
+                        "name": "Racing Entity",
+                        "group_id": "grp",
+                        "summary": "created by a racing caller",
+                    }),
+                ),
+                state,
+                None,
+            )
+            .await
+        }));
+    }
+
+    let mut results = Vec::new();
+    for t in tasks {
+        results.push(serde_json::to_value(t.await.unwrap()).unwrap());
+    }
+    for r in &results {
+        assert!(r.get("result").is_some(), "call should succeed: {r}");
+    }
+
+    let created_count = results
+        .iter()
+        .filter(|r| r["result"]["created"].as_bool().unwrap())
+        .count();
+    assert_eq!(
+        created_count, 1,
+        "exactly one of the two racing creates should report created=true: {results:?}"
+    );
+
+    let uuids: Vec<&str> = results
+        .iter()
+        .map(|r| r["result"]["entity_uuid"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uuids[0], uuids[1],
+        "the losing call must resolve to the same row the winner created: {results:?}"
+    );
+
+    let conn = db_check.connect().unwrap();
+    let count = conn
+        .count_active_entities_by_name_ci("Racing Entity", "grp")
+        .unwrap();
+    assert_eq!(count, 1, "expected exactly one row, found a duplicate");
+}
+
+/// FR-011/SC-003: the edge equivalent of the entity race above — two concurrent
+/// `knowledge_assert_relationship` calls racing to create the identical not-yet-existing edge
+/// `(source, target, predicate, group_id)` must yield exactly one created edge.
+#[tokio::test]
+async fn assert_relationship_concurrent_creates_of_same_identity_yield_one_row() {
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    let db_check = Arc::clone(&db);
+    {
+        let conn = db.connect().unwrap();
+        for (uuid, name) in [
+            ("source-uuid", "Source Entity"),
+            ("target-uuid", "Target Entity"),
+        ] {
+            conn.insert_entity(&EntityRow {
+                uuid: uuid.to_string(),
+                name: name.to_string(),
+                group_id: "grp".to_string(),
+                labels: vec!["Entity".to_string()],
+                created_at: "2026-01-01 00:00:00".to_string(),
+                name_embedding: vec![0.0; dim],
+                summary: "seed".to_string(),
+                attributes: "{}".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let embedder: Arc<dyn Embedder> = Arc::new(BarrierEmbedder { dim, barrier });
+    let state = make_state_with_embedder(db, embedder);
+
+    let mut tasks = Vec::new();
+    for id in 1..=2 {
+        let state = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            handlers::dispatch(
+                ipc_req(
+                    id,
+                    "knowledge_assert_relationship",
+                    json!({
+                        "source_name": "Source Entity",
+                        "target_name": "Target Entity",
+                        "predicate": "RACES_WITH",
+                        "group_id": "grp",
+                    }),
+                ),
+                state,
+                None,
+            )
+            .await
+        }));
+    }
+
+    let mut results = Vec::new();
+    for t in tasks {
+        results.push(serde_json::to_value(t.await.unwrap()).unwrap());
+    }
+    for r in &results {
+        assert!(r.get("result").is_some(), "call should succeed: {r}");
+    }
+
+    let created_count = results
+        .iter()
+        .filter(|r| r["result"]["created"].as_bool().unwrap())
+        .count();
+    assert_eq!(
+        created_count, 1,
+        "exactly one of the two racing creates should report created=true: {results:?}"
+    );
+
+    let uuids: Vec<&str> = results
+        .iter()
+        .map(|r| r["result"]["edge_uuid"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uuids[0], uuids[1],
+        "the losing call must resolve to the same edge the winner created: {results:?}"
+    );
+
+    let conn = db_check.connect().unwrap();
+    let matching = conn
+        .get_edges_for_entity("source-uuid")
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.name == "RACES_WITH" && e.target_node_uuid == "target-uuid" && e.invalid_at.is_none()
+        })
+        .count();
+    assert_eq!(matching, 1, "expected exactly one edge, found a duplicate");
+}
+
+/// FR-012/SC-001: a concurrent unrelated write (an update, which never touches the embedder)
+/// must complete without waiting for another call's in-flight, slow-but-healthy embedder round
+/// trip. Demonstrates the throughput independence directly, rather than by inference from the
+/// hung-embedder test above.
+#[tokio::test]
+async fn assert_entity_unrelated_write_not_gated_by_slow_embedder() {
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "existing-uuid".to_string(),
+            name: "Existing Entity".to_string(),
+            group_id: "grp".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0; dim],
+            summary: "seed".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(DelayEmbedder {
+        dim,
+        delay: Duration::from_millis(500),
+        started: Arc::clone(&started),
+    });
+    let state = make_state_with_embedder(db, embedder);
+
+    let state_create = Arc::clone(&state);
+    let create_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                1,
+                "knowledge_assert_entity",
+                json!({
+                    "name": "Brand New Entity",
+                    "group_id": "grp",
+                    "summary": "",
+                }),
+            ),
+            state_create,
+            None,
+        )
+        .await
+    });
+
+    // Wait for the create call to have acquired (and dropped) the lock for Pass 1 and entered
+    // its slow embed call, rather than guessing with a fixed sleep (review feedback: a fixed
+    // delay can still race under CI load).
+    started.notified().await;
+
+    let state_update = Arc::clone(&state);
+    let start_update = std::time::Instant::now();
+    let update_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                2,
+                "knowledge_assert_entity",
+                json!({
+                    "name": "Existing Entity",
+                    "group_id": "grp",
+                    "summary": "updated while create's embedder is slow",
+                }),
+            ),
+            state_update,
+            None,
+        )
+        .await
+    });
+
+    // Measure the update's own completion time first — see the matching comment in the
+    // hung-embedder test above for why await order matters here.
+    let update_resp = tokio::time::timeout(Duration::from_secs(10), update_task)
+        .await
+        .expect("update must not hang indefinitely")
+        .unwrap();
+    let update_elapsed = start_update.elapsed();
+
+    let create_resp = tokio::time::timeout(Duration::from_secs(10), create_task)
+        .await
+        .expect("create must not hang indefinitely")
+        .unwrap();
+
+    let update_val = serde_json::to_value(update_resp).unwrap();
+    assert!(
+        update_val.get("result").is_some(),
+        "concurrent update should succeed: {update_val}"
+    );
+    assert_eq!(update_val["result"]["created"], false);
+
+    let create_val = serde_json::to_value(create_resp).unwrap();
+    assert!(
+        create_val.get("result").is_some(),
+        "create should succeed: {create_val}"
+    );
+    assert_eq!(create_val["result"]["created"], true);
+
+    // 350ms leaves CI scheduling headroom (review feedback: 200ms was too tight) while still
+    // clearly separating "not gated at all" from the 500ms-embed regression this test guards
+    // against.
+    assert!(
+        update_elapsed < Duration::from_millis(350),
+        "concurrent update took {update_elapsed:?} — expected it to complete well before the \
+         delayed embedder call (500ms) returns, demonstrating it is not ordered after it"
+    );
+}
+
+/// Edge case from issue #543's Acceptance Scenario 2, third bullet: a create call resolves
+/// "not found" and is paused mid-embed; before it re-acquires the lock, a concurrent writer
+/// creates a *different* active entity under the exact name the paused call is trying to
+/// create. The paused call's Pass 2 re-resolution must find that entity and take the update
+/// path against it, rather than inserting a second, colliding row (FR-008).
+#[tokio::test]
+async fn assert_entity_during_embed_collision_takes_update_path_not_duplicate_insert() {
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    let db_check = Arc::clone(&db);
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(PausableEmbedder {
+        dim,
+        started: Arc::clone(&started),
+        proceed: Arc::clone(&proceed),
+    });
+    let state = make_state_with_embedder(db, embedder);
+
+    let state_create = Arc::clone(&state);
+    let create_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                1,
+                "knowledge_assert_entity",
+                json!({
+                    "name": "Contested Name",
+                    "group_id": "grp",
+                    "summary": "",
+                }),
+            ),
+            state_create,
+            None,
+        )
+        .await
+    });
+
+    // Wait until the create call's Pass 1 has resolved "not found", dropped the lock, and
+    // entered the embed call — exactly the window this edge case targets.
+    started.notified().await;
+
+    // A concurrent writer creates a *different* active entity under the exact name the paused
+    // call is trying to create — simulated with a direct DB insert (rather than a second
+    // `knowledge_assert_entity` call) since the point under test is the paused call's Pass 2
+    // re-resolution, not how the collider itself came to exist.
+    {
+        let conn = db_check.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "collider-uuid".to_string(),
+            name: "Contested Name".to_string(),
+            group_id: "grp".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0; dim],
+            summary: "created by a concurrent writer during the dropped-lock window".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    proceed.notify_one();
+
+    let create_resp = tokio::time::timeout(Duration::from_secs(10), create_task)
+        .await
+        .expect("create call must not hang indefinitely")
+        .unwrap();
+    let create_val = serde_json::to_value(create_resp).unwrap();
+    assert!(
+        create_val.get("result").is_some(),
+        "call should succeed: {create_val}"
+    );
+    assert_eq!(
+        create_val["result"]["created"], false,
+        "Pass 2's re-resolution should find the collider and take the update path, not insert \
+         a duplicate: {create_val}"
+    );
+    assert_eq!(create_val["result"]["entity_uuid"], "collider-uuid");
+
+    let conn = db_check.connect().unwrap();
+    let count = conn
+        .count_active_entities_by_name_ci("Contested Name", "grp")
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "expected no duplicate row from the paused call's insert"
+    );
+}
+
+/// Review finding on the initial version of this PR: pre-#543, `write_lock` was held
+/// continuously from endpoint resolution through the edge insert, so a concurrent
+/// `knowledge_merge_entities` call (which also takes `write_lock`) could never tombstone an
+/// endpoint mid-operation — that window was zero-width. Narrowing the critical section opened a
+/// real window (the embedder round trip) in which a merge can land: this test pauses a create
+/// call mid-embed, merges its *source* endpoint into a different canonical entity during that
+/// window, and confirms the resulting edge attaches to the canonical entity — never to the
+/// now-tombstoned alias — exactly as a fresh by-name resolution would.
+#[tokio::test]
+async fn assert_relationship_endpoint_merged_during_embed_attaches_to_canonical() {
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    let db_check = Arc::clone(&db);
+    {
+        let conn = db.connect().unwrap();
+        for (uuid, name) in [
+            ("alias-uuid", "Alias Source"),
+            ("canonical-uuid", "Canonical Source"),
+            ("target-uuid", "Target Entity"),
+        ] {
+            conn.insert_entity(&EntityRow {
+                uuid: uuid.to_string(),
+                name: name.to_string(),
+                group_id: "grp".to_string(),
+                labels: vec!["Entity".to_string()],
+                created_at: "2026-01-01 00:00:00".to_string(),
+                name_embedding: vec![0.0; dim],
+                summary: "seed".to_string(),
+                attributes: "{}".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(PausableEmbedder {
+        dim,
+        started: Arc::clone(&started),
+        proceed: Arc::clone(&proceed),
+    });
+    let state = make_state_with_embedder(db, embedder);
+
+    let state_create = Arc::clone(&state);
+    let create_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                1,
+                "knowledge_assert_relationship",
+                json!({
+                    "source_name": "Alias Source",
+                    "target_name": "Target Entity",
+                    "predicate": "RELATES_TO_TEST",
+                    "group_id": "grp",
+                }),
+            ),
+            state_create,
+            None,
+        )
+        .await
+    });
+
+    // Wait until Pass 1 has resolved both endpoints, found no existing edge, dropped the lock,
+    // and entered the embed call — exactly the window this test targets.
+    started.notified().await;
+
+    // Merge the source endpoint into a different canonical entity while the create call's lock
+    // is dropped for its embed call.
+    {
+        let conn = db_check.connect().unwrap();
+        let params = MergeEntitiesParams {
+            canonical_uuid: Some("canonical-uuid".to_string()),
+            alias_uuids: vec!["alias-uuid".to_string()],
+            group_id: "grp".to_string(),
+            ..Default::default()
+        };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let result = corrections::merge_entities(&conn, &params, &ts);
+        assert!(result.success, "merge should succeed: {result:?}");
+    }
+
+    proceed.notify_one();
+
+    let create_resp = tokio::time::timeout(Duration::from_secs(10), create_task)
+        .await
+        .expect("create call must not hang indefinitely")
+        .unwrap();
+    let create_val = serde_json::to_value(create_resp).unwrap();
+    assert!(
+        create_val.get("result").is_some(),
+        "call should succeed: {create_val}"
+    );
+    assert_eq!(create_val["result"]["created"], true);
+
+    let conn = db_check.connect().unwrap();
+    let canonical_edges = conn.get_full_edges_for_entity("canonical-uuid").unwrap();
+    let matching = canonical_edges
+        .iter()
+        .filter(|e| {
+            e.name == "RELATES_TO_TEST"
+                && e.target_node_uuid == "target-uuid"
+                && e.invalid_at.is_none()
+        })
+        .count();
+    assert_eq!(
+        matching, 1,
+        "expected the new edge to attach to the canonical (post-merge) entity: {canonical_edges:?}"
+    );
+
+    let alias_edges = conn.get_full_edges_for_entity("alias-uuid").unwrap();
+    assert!(
+        alias_edges
+            .iter()
+            .all(|e| e.invalid_at.is_some() || e.name != "RELATES_TO_TEST"),
+        "the new edge must not remain attached to the tombstoned alias entity: {alias_edges:?}"
     );
 }
