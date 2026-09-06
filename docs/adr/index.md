@@ -125,6 +125,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0541](0541-uds-embedder-transport-timeouts.md) | Bounded Timeouts for `OaiEmbedder`'s UDS Transport | 2026-09-05 |
 | [0543](0543-narrow-write-lock-around-embedder-round-trip.md) | Narrow `state.write_lock`'s Critical Section Around the Embedder Round Trip | 2026-09-05 |
 | [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
+| [0559](0559-bundle-lbug-extensions.md) | Bundle lbug vector/fts extensions so startup never downloads from the CDN | 2026-09-05 |
 
 ## Historical numbering
 

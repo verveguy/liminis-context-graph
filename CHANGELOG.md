@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Added
+
+- Bundled lbug vector/fts extensions: the release archive now ships the extension binaries for
+  its target platform, so `Db::open` never needs to download them from
+  `extension.ladybugdb.com` at startup — a fresh install on an air-gapped or
+  egress-restricted host now works with zero prior cache and zero network access. Falls back
+  to today's download-on-demand behavior when no bundle is found (e.g. running from source).
+  `LCG_LBUG_HOME` lets an operator redirect resolution to a directory of their own. See the
+  README's "Offline / air-gapped startup" section and
+  [ADR-0559](docs/adr/0559-bundle-lbug-extensions.md) (#559).
+
 ## [0.14.0] - 2026-09-02
 
 lbug 0.17.0 → 0.18.1, the entity-name lookup moved from process memory to a database-native ART

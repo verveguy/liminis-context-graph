@@ -39,7 +39,12 @@ targets = [
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
 ]
-include = ["LICENSE", "README.md", "CHANGELOG.md"]
+# .lbdb: the bundled lbug vector/fts extension binaries staged per-target by
+# scripts/stage-lbug-extensions.sh (invoked from .github/build-setup.yml before `dist build`
+# runs) — see issue #559 / ADR-0559. Flat list, applies identically to every target's archive,
+# same as the other three entries; per-target content differs because each matrix job stages
+# only its own platform's files into this path before packaging.
+include = ["LICENSE", "README.md", "CHANGELOG.md", ".lbdb"]
 # Lives at .github/build-setup.yml (one level up from .github/workflows/, where
 # cargo-dist resolves this path). Kept OUT of .github/workflows/ so GitHub does
 # not try to run the bare steps-fragment as a workflow and post an
