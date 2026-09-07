@@ -1012,9 +1012,9 @@ dependencies = [
 
 [[package]]
 name = "lbug"
-version = "0.18.1"
+version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3a3c31a30c93756dcdf76fadb3d35ea237ad750a530d49cf4bce8ee073092c8"
+checksum = "f8f69721f12ba475a701175989c1827da3517d12fe6152fdfc002d7e6c2daa11"
 dependencies = [
  "cmake",
  "cxx",
@@ -1024,6 +1024,7 @@ dependencies = [
  "serde_json",
  "time",
  "uuid",
+ "vcpkg",
 ]
 
 [[package]]
