@@ -40,7 +40,7 @@
 # fine for local development.
 #
 # LBUG_VERSION pins the prebuilt lbug native bundle to match the `lbug` crate
-# (=0.20.1). Without it, lbug's build.rs downloads the *floating* `latest`
+# (=0.20.2). Without it, lbug's build.rs downloads the *floating* `latest`
 # ladybug release, building this crate's FFI against a newer, incompatible
 # native bundle. That skew broke the v0.9.0 release: the then-latest 0.18.1
 # bundle linked httplib against OpenSSL (`ssl_st`) while the pinned 0.17.0 crate
@@ -70,4 +70,4 @@ RUST_TEST_THREADS = "4"
 # `pkg-config --libs openssl` returned the staged directory (#550). force makes
 # cargo's value authoritative regardless of what dist passes down.
 PKG_CONFIG_PATH = { value = ".openssl-rpath/lib/pkgconfig", relative = true, force = true }
-LBUG_VERSION = "0.18.1"
+LBUG_VERSION = "0.20.2"
