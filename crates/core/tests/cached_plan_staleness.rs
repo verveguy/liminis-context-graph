@@ -103,6 +103,10 @@ fn enable_cached_prepared_statement_setting_exists_and_is_settable() {
     let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
     let conn = db.connect().unwrap();
 
+    // Upstream (`settings.h`'s `EnableCachedPreparedStatementSetting`) accepts `READS`, `WRITES`,
+    // `BOTH`, or `NONE`. `NONE` disables the cached-plan fast path entirely -- the strongest
+    // setting and the one operators would reach for as the ladybug#883 mitigation -- so it's the
+    // most meaningful value to prove is accepted here.
     conn.run_cypher("CALL enable_cached_prepared_statement='NONE'")
         .expect("enable_cached_prepared_statement should be a recognized, settable pragma");
 }
