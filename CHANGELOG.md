@@ -9,6 +9,51 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+lbug 0.18.1 → 0.20.2, superseding the 0.20.1 pin that `73d8c0cc` rolled back after a deterministic
+deadlock. **One-way storage migration (42 → 47) — read Upgrading.**
+
+### Upgrading
+
+1. **One-way migration.** A database at storage version 42 (written by 0.18.1, including
+   everything v0.14.0 and v0.14.1 shipped) opens directly under the new binary — no export, WAL
+   untouched. The first checkpoint rewrites it to storage 47, after which an older binary will
+   not open it. Roll back by stopping the service, moving `.lcg/db/` aside, and starting the old
+   binary; it rebuilds from the WAL.
+2. No API changes and no other manual step.
+
+### Fixed
+
+- The cached-plan fast path could return stale rows from a re-executed parameterized query —
+  `query_params`/`exec_params`'s normal calling pattern, not an edge case — fixed upstream by
+  `LadybugDB/ladybug#877`/`#878` and shipped in 0.20.2. Research for this change found the
+  regression was introduced by upstream's plan-caching optimization landed after 0.19.1 and fixed
+  within the same 0.20.x line, so the currently-shipping 0.18.1 does not appear to exhibit it —
+  this is a forward-looking correctness fix, not a fix for a bug already present in a release
+  that shipped. Covered by new re-execution regression tests exercising the exact pattern.
+- Picks back up several fixes the 0.18.1 rollback deferred: `ladybug#845` (FTS heap corruption
+  under concurrent scan/write — this service runs `CREATE_FTS_INDEX` and queries it concurrently
+  as a live process), `#837` (primary-key-lookup alignment, which issue #221 depends on), `#864`
+  (silent row loss in `LOAD FROM`/`UNWIND` feeding a `MATCH` primary-key predicate), `#894`
+  (several planner bugs), and `#884` (an `ArrowResultCollector` downcast fix).
+
+### Internal
+
+- The 0.20.1 deadlock that forced the original rollback does not reproduce under 0.20.2, per a
+  retest in the same container shape that wedged deterministically before (reported upstream as
+  `LadybugDB/ladybug#911`, now closed with the maintainer's acknowledgment).
+- `LBUG_EXTENSION_VERSION` moves to `0.20.0` (not `0.20.2`) — the lbug 0.20.2 crate compiles
+  against and the CDN publishes under extension-directory version `0.20.0`, a divergence from the
+  crate's own semver. Getting this wrong either fails loudly (a 404 during staging) or, if bytes
+  were hand-staged under a mismatched directory name, would silently reintroduce the CDN
+  dependency #559 removed; the latter is prevented structurally by `stage-lbug-extensions.sh`
+  being the sole writer of that directory tree, not by a runtime check.
+- `enable_cached_prepared_statement`, new in the 0.20.2 bundle, is confirmed present and settable
+  as an operator escape hatch (`CALL enable_cached_prepared_statement='NONE'`) for
+  `ladybug#883` — an open, unfixed SIGSEGV in the cached-prepared-statement path that needs
+  hundreds of parameterized queries in one session to surface. It is not enabled by default. A
+  1,200-iteration single-session regression test found no crash, hang, or stale result, reducing
+  but not eliminating this risk.
+
 ## [0.14.1] - 2026-09-06
 
 A maintenance release: startup no longer depends on a third-party CDN, and two unbounded-wait
