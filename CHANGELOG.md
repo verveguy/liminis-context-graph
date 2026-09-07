@@ -9,6 +9,11 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-06
+
+A maintenance release: startup no longer depends on a third-party CDN, and two unbounded-wait
+defects on the embedder path are fixed. No migration, no API changes.
+
 ### Added
 
 - Bundled lbug vector/fts extensions: the release archive now ships the extension binaries for
@@ -19,6 +24,29 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `LCG_LBUG_HOME` lets an operator redirect resolution to a directory of their own. See the
   README's "Offline / air-gapped startup" section and
   [ADR-0559](docs/adr/0559-bundle-lbug-extensions.md) (#559).
+
+### Fixed
+
+- The UDS embedder transport had no timeout. `LCG_EMBEDDING_TIMEOUT_MS` (whole-request) and
+  `LCG_EMBEDDING_CONNECT_TIMEOUT_MS` (acquiring a pooled connection) now bound it, with the same
+  defaults and validation the HTTP transport already used. This is the unbounded hang #510 fixed
+  for HTTP, still present on the **default** transport: a hung or unresponsive sidecar could
+  stall an embed call indefinitely. See
+  [ADR-0541](docs/adr/0541-uds-embedder-transport-timeouts.md) (#541).
+- `state.write_lock` is no longer held across the embedder round trip. `knowledge_assert_entity`
+  and `knowledge_assert_relationship` now resolve-and-update under the lock, release it for the
+  embed, then re-acquire and re-resolve before inserting — falling back to the update path if a
+  concurrent writer won the race. Unrelated writes are no longer serialized behind a slow
+  embedder. See [ADR-0543](docs/adr/0543-narrow-write-lock-around-embedder-round-trip.md) (#543).
+
+### Internal
+
+- Closed a TOCTOU port race in `embedder_degraded_mcp.rs`'s test helpers that had caused a flaky
+  `AddrInUse` failure, and made a lost race in the delayed-bind stub fail loudly rather than
+  masquerading as an embedder-unreachable product failure (#560).
+- The release runbook now requires the two sidecar-gated tests to be run and their figures
+  recorded before a release — they skip silently when no sidecar is present, so a green board
+  never proved they ran (#531, #566).
 
 ## [0.14.0] - 2026-09-02
 
