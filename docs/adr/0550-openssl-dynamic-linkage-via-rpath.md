@@ -101,7 +101,7 @@ explicitly *not* by static linking or bundling.
 This differs across the versions we have pinned, and the difference decides which
 lever actually works:
 
-| | 0.18.1 (current pin) | 0.20.1 |
+| | 0.18.1 | 0.20.1 / 0.20.2 (current pin) |
 |---|---|---|
 | `OPENSSL_DIR` / `OPENSSL_ROOT_DIR` | **not read** | checked first, returns immediately |
 | vcpkg | not used | tried, returns if found |
@@ -114,12 +114,14 @@ there is no fallback to pollute the search path, so pointing pkg-config at the
 staged directory is enough. `stage-openssl-rpath.sh` still exports `OPENSSL_DIR`,
 which is harmless here and correct if the pin moves forward again.
 
-On **0.20.1** the pkg-config branch does *not* return, so the Homebrew keg — with
-its `.dylib` files and absolute install names — is added to the search path
-alongside the staged directory, and satisfying pkg-config is not enough on its
-own. Only the `OPENSSL_DIR` branch returns early. That version is not currently
-pinned (see #556: 0.20.1 deadlocks, `ladybug#911`), but the mechanism is recorded
-here so the next upgrade does not have to rediscover it.
+On **0.20.1 / 0.20.2** the pkg-config branch does *not* return, so the Homebrew
+keg — with its `.dylib` files and absolute install names — is added to the
+search path alongside the staged directory, and satisfying pkg-config is not
+enough on its own. Only the `OPENSSL_DIR` branch returns early. 0.20.1 itself
+was never shipped (see #556: 0.20.1 deadlocks, `ladybug#911`), but `build.rs`'s
+OpenSSL-discovery logic is unchanged between 0.20.1 and 0.20.2 — confirmed via
+byte-identical Rust submodule SHA (see #561) — so this column's behavior is what
+the current 0.20.2 pin actually exercises.
 
 ### Why link time, not post-build
 
