@@ -13,6 +13,20 @@
 //! (vendored lbug C++) only special-cases a name that matches its `OFFICIAL_EXTENSION` table by
 //! exact string equality (`"VECTOR"`, `"FTS"`, ...) — a filesystem path never matches, so it
 //! `dlopen`s the given path directly and never touches `home_directory` or the CDN.
+//!
+//! **The versioned extension directory this module resolves must only ever be produced by
+//! `scripts/stage-lbug-extensions.sh` — never hand-copied or hand-renamed.** [`check_candidate`]
+//! below can only confirm a directory named `<LBUG_EXTENSION_VERSION>/<platform>` exists and
+//! contains non-empty files; it has no way to verify those bytes actually correspond to the
+//! version the directory name claims (issue #561 Background: staging correct-but-differently-
+//! versioned bytes under a directory renamed to match a wrong `LBUG_EXTENSION_VERSION` would
+//! resolve and load "successfully" while silently defeating this module's whole purpose, and no
+//! test can catch it after the fact — the only ground truth is the CDN, which a unit test can't
+//! assume network access to). The safety property here is structural, not test-driven:
+//! `stage-lbug-extensions.sh` derives both the download URL and the destination directory name
+//! from the same `$version` shell variable, read once from this repo's `LBUG_EXTENSION_VERSION`
+//! file, so a script-driven mismatch between a directory's name and its contents is impossible by
+//! construction. The dangerous scenario requires a human bypassing the script entirely.
 
 use std::path::{Path, PathBuf};
 
@@ -55,7 +69,7 @@ fn extension_version() -> &'static str {
 /// `lbug` workspace pin, and this must be hand-updated to match it (independently of whatever
 /// `LBUG_EXTENSION_VERSION` ends up being set to), or the test fails.
 #[allow(dead_code)] // only read by the `#[cfg(test)]` tripwire below
-const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.18.1";
+const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.20.2";
 
 const EXTENSION_NAMES: [&str; 2] = ["vector", "fts"];
 
@@ -273,6 +287,14 @@ mod tests {
         );
     }
 
+    /// Proves only that a *missing* versioned directory falls through safely to the next
+    /// precedence tier — it does not and structurally cannot prove that a *present* directory's
+    /// staged bytes actually correspond to the version its name claims. Distinguishing "bytes
+    /// staged under a mismatched directory name" from "bytes staged under a correct directory
+    /// name" is impossible from inside this module: both look identical to `check_candidate`
+    /// (a directory exists, the files inside it are non-empty). That gap is closed structurally,
+    /// not by a test — see this module's doc comment above and `stage-lbug-extensions.sh`, the
+    /// only legitimate writer of this directory tree.
     #[test]
     fn version_drift_falls_through_cleanly_instead_of_erroring() {
         let dir = tempfile::tempdir().unwrap();

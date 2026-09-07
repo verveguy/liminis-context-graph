@@ -1830,7 +1830,7 @@ impl<'db> Conn<'db> {
     /// cosine-rechecks the full fused set against `threshold`, and returns the best match.
     ///
     /// Note: the `ef` search parameter is not configurable through lbug's Rust binding as of
-    /// 0.20.1; the lbug default is used.
+    /// 0.20.2 (re-verified: `SystemConfig` has no ef/HNSW-search field); the lbug default is used.
     pub fn hybrid_dedup_similar_entity(
         &self,
         name_embedding: &[f32],
