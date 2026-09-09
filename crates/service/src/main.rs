@@ -1225,16 +1225,28 @@ async fn run_mcp_standalone(
 /// Runs attached MCP-over-stdio mode (FR-006): this process never touches the workspace
 /// filesystem or opens the DB. Every `tools/call` is forwarded as JSON-RPC over `socket_path`
 /// to an already-running service, so it never contends for lbug's single-writer lock (SC-002).
+///
+/// By default (`eager: false`, issue #575) the socket is never dialled here — `initialize` and
+/// `tools/list` complete without it, and the first `tools/call` triggers a lazy dial via
+/// `AttachedBackend::new_lazy`. Passing `--connect-eager` sets `eager: true`, restoring the
+/// pre-#575 behavior of dialling now and exiting (via `?`) before the MCP handshake if the
+/// socket is unreachable — kept as a byte-for-byte-identical call to the unmodified `connect()`
+/// (SC-004).
 async fn run_mcp_attached(
     socket_path: String,
     scopes: Vec<mcp::scope::Scope>,
     allow_remote_close: bool,
+    eager: bool,
     shutdown_ct: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "liminis-context-graph: MCP-over-stdio (attached to {socket_path}), scope={scopes:?}"
     );
-    let backend = mcp::attached::AttachedBackend::connect(&socket_path).await?;
+    let backend = if eager {
+        mcp::attached::AttachedBackend::connect(&socket_path).await?
+    } else {
+        mcp::attached::AttachedBackend::new_lazy(&socket_path)
+    };
     let server = mcp::server::LcgMcpServer::new(backend, scopes, allow_remote_close, None);
 
     // `shutdown_ct` is the one shared signal source installed at the top of `async_main` (see
@@ -1279,14 +1291,23 @@ async fn async_main(
         connect: Some(socket_path),
         scopes,
         allow_remote_close,
+        connect_eager,
         ..
     } = &cli_mode
     {
         let socket_path = socket_path.clone();
         let scopes = scopes.clone();
         let allow_remote_close = *allow_remote_close;
+        let connect_eager = *connect_eager;
         drop(sink_drain_handle); // attached mode emits no telemetry events; nothing to drain
-        return run_mcp_attached(socket_path, scopes, allow_remote_close, shutdown_ct).await;
+        return run_mcp_attached(
+            socket_path,
+            scopes,
+            allow_remote_close,
+            connect_eager,
+            shutdown_ct,
+        )
+        .await;
     }
 
     // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
@@ -1417,6 +1438,7 @@ async fn async_main(
             connect: None,
             scopes,
             allow_remote_close,
+            connect_eager: _,
         } => {
             // FR-002/FR-003: standalone --mcp-stdio mode retries an unreachable embedder with
             // bounded backoff and, if the window is exhausted, starts in degraded mode instead

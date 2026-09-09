@@ -35,6 +35,10 @@ pub enum CliMode {
         scopes: Vec<Scope>,
         /// `--allow-remote-close`: only meaningful in attached mode (FR-005).
         allow_remote_close: bool,
+        /// `--connect-eager` (issue #575, FR-008): only meaningful in attached mode. Restores
+        /// the pre-#575 behavior of dialling `connect` at startup and exiting on failure,
+        /// instead of the new default of deferring the dial until the first `tools/call`.
+        connect_eager: bool,
     },
     /// `--help` / `-h`: caller should print `usage()` and exit successfully.
     Help,
@@ -64,6 +68,11 @@ OPTIONS:
                                an already-running service instead of opening the database.
     --allow-remote-close       (MCP attached mode only) Allow knowledge_close to shut down the
                                remote service. No effect in standalone mode.
+    --connect-eager            (MCP attached mode only) Dial --connect's socket at startup and
+                               exit if unreachable, restoring the pre-issue-575 behavior. By
+                               default the dial is deferred until the first tools/call, so
+                               initialize and tools/list succeed even before the daemon is up.
+                               No effect without --connect.
     --embedder-uds <SOCKET>    Reach the embedding sidecar over this Unix socket.
     --embedder-http <URL>      Reach the embedding sidecar over this HTTP URL.
                                (--embedder-uds and --embedder-http are mutually exclusive.)
@@ -86,6 +95,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut connect: Option<String> = None;
     let mut scope_arg: Option<String> = None;
     let mut allow_remote_close = false;
+    let mut connect_eager = false;
     let mut cli_uds: Option<String> = None;
     let mut cli_http: Option<String> = None;
     let mut extractor_cli_uds: Option<String> = None;
@@ -100,6 +110,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
             "--version" | "-V" => want_version = true,
             "--mcp-stdio" => mcp_stdio = true,
             "--allow-remote-close" => allow_remote_close = true,
+            "--connect-eager" => connect_eager = true,
             "--connect" => {
                 i += 1;
                 connect = Some(
@@ -209,6 +220,12 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
              (no --connect); ignoring"
         );
     }
+    if connect_eager && connect.is_none() {
+        eprintln!(
+            "liminis-context-graph: --connect-eager has no effect in standalone MCP mode \
+             (no --connect); ignoring"
+        );
+    }
 
     let scopes = Scope::parse_list(scope_arg.as_deref().unwrap_or("all"))?;
 
@@ -218,6 +235,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         connect,
         scopes,
         allow_remote_close,
+        connect_eager,
     })
 }
 
@@ -321,12 +339,14 @@ mod tests {
                 connect,
                 scopes,
                 allow_remote_close,
+                connect_eager,
                 embedder,
                 extractor,
             } => {
                 assert_eq!(connect, None);
                 assert_eq!(scopes, Scope::ALL.to_vec());
                 assert!(!allow_remote_close);
+                assert!(!connect_eager);
                 assert_eq!(embedder, None);
                 assert_eq!(extractor, None);
             }
@@ -385,6 +405,30 @@ mod tests {
     fn allow_remote_close_without_connect_is_accepted_but_inert() {
         // Edge case from the spec: no error, just a no-op (stderr notice only).
         let result = parse_args(&args(&["--mcp-stdio", "--allow-remote-close"]));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn mcp_stdio_attached_mode_with_connect_eager() {
+        match parse_args(&args(&[
+            "--mcp-stdio",
+            "--connect",
+            ".lcg/service.sock",
+            "--connect-eager",
+        ]))
+        .unwrap()
+        {
+            CliMode::Mcp { connect_eager, .. } => assert!(connect_eager),
+            other => panic!("expected Mcp mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_eager_without_connect_is_accepted_but_inert() {
+        // Mirrors allow_remote_close_without_connect_is_accepted_but_inert: no error, just a
+        // no-op (stderr notice only) — --connect-eager has nothing to be eager about without
+        // --connect.
+        let result = parse_args(&args(&["--mcp-stdio", "--connect-eager"]));
         assert!(result.is_ok());
     }
 
@@ -459,6 +503,7 @@ mod tests {
             "--mcp-stdio",
             "--scope",
             "--connect",
+            "--connect-eager",
             "--embedder-uds",
             "--extractor-uds",
             "--help",
