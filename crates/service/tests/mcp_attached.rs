@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -390,6 +390,121 @@ fn attached_mode_reconnects_after_remote_service_restart() {
     );
 
     mcp.shutdown();
+}
+
+// ── #575: lazy connect by default ───────────────────────────────────────────────
+
+/// User Story 1 / SC-001: `initialize` and `tools/list` must succeed against a socket path that
+/// was never bound by any daemon, with no dial attempted. Only a subsequent `tools/call`
+/// attempts the dial, fails, and surfaces `isError: true` naming the socket path — the process
+/// never exits.
+#[test]
+fn attached_mode_lazy_connect_serves_handshake_without_daemon() {
+    let dir = TempDir::new().unwrap();
+    // Never bound by any listener — parent directory exists (TempDir), but the socket file
+    // itself does not, matching the exact repro in #574/#575.
+    let socket_path = dir.path().join("does-not-exist.sock");
+
+    let mut mcp = spawn_attached(&socket_path, &["--scope=read"]);
+    mcp.initialize();
+
+    let tools = mcp.list_tools();
+    assert!(
+        !tools.is_empty(),
+        "expected the read-scope tool set to be served from the compiled-in registry without \
+         dialling the socket"
+    );
+
+    let resp = mcp.call_tool("knowledge_status", json!({}));
+    assert_eq!(
+        resp["result"]["isError"],
+        json!(true),
+        "expected a clean tool error dialling an unbound socket, not a crash: {resp:?}"
+    );
+    let message = resp["result"]["structuredContent"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains(socket_path.to_str().unwrap()),
+        "expected the error message to name the socket path, got: {resp:?}"
+    );
+
+    mcp.shutdown();
+}
+
+/// User Story 2 / SC-002: once the daemon becomes reachable at the same socket path a session
+/// already handshook against, the next `tools/call` succeeds via the same lazy-redial machinery
+/// that already handles a connection going dead mid-session — with no client-side reconnect
+/// (no new `initialize`, no process restart).
+#[test]
+fn attached_mode_lazy_connect_succeeds_once_daemon_starts_after_handshake() {
+    let socket_dir = TempDir::new().unwrap();
+    let socket_path = socket_dir.path().join("service.sock");
+
+    let mut mcp = spawn_attached(&socket_path, &[]);
+    mcp.initialize();
+
+    let resp1 = mcp.call_tool("knowledge_status", json!({}));
+    assert_eq!(
+        resp1["result"]["isError"],
+        json!(true),
+        "expected the first call to fail: no daemon has been started yet: {resp1:?}"
+    );
+
+    let port = spawn_stub_embedder();
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+    let db_dir = TempDir::new().unwrap();
+    let _service = spawn_socket_service_at(&socket_path, &db_dir, &url);
+
+    let resp2 = mcp.call_tool("knowledge_status", json!({}));
+    assert!(
+        resp2["result"]["isError"].as_bool() != Some(true),
+        "expected the call to succeed via lazy dial now that the daemon is up, with no \
+         client-side reconnect on the same MCP session: {resp2:?}"
+    );
+
+    mcp.shutdown();
+}
+
+/// User Story 4 / SC-004: `--connect-eager` restores byte-for-byte parity with the pre-#575
+/// behavior — dial at startup, exit immediately (never reaching `initialize`) if the socket is
+/// unreachable. Mirrors `embedder_degraded_mcp.rs`'s
+/// `socket_mode_still_fails_fast_on_unreachable_embedder` pattern: a raw `Command::output()`
+/// call with stdin/stdout closed, asserting on exit status, elapsed time, and stderr content.
+#[test]
+fn attached_mode_connect_eager_fails_fast_on_unreachable_socket() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("does-not-exist.sock");
+
+    let mut cmd = Command::new(binary_path());
+    cmd.args([
+        "--mcp-stdio",
+        "--connect",
+        socket_path.to_str().unwrap(),
+        "--connect-eager",
+        "--scope=read",
+    ]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let start = Instant::now();
+    let output = cmd.output().expect("spawn liminis-context-graph");
+    let elapsed = start.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "--connect-eager must still fail fast on an unreachable socket, never reaching initialize"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "expected an immediate failure, took {elapsed:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(socket_path.to_str().unwrap()),
+        "expected the unchanged dial() error message naming the socket path, got stderr: {stderr}"
+    );
 }
 
 // ── #213: write-time failure auto-retry (SC-004) ────────────────────────────────
