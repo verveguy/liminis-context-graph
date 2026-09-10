@@ -1,0 +1,2 @@
+{"seq":0,"ts":"2026-06-01T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, n.group_id = $group_id, n.summary = $summary, n.attributes = $attributes","params":{"uuid":"entity-0","name":"Entity Zero","group_id":"liminis","summary":"S0","attributes":"{}"}}
+{"seq":1,"ts":"2026-06-01T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: $uuid}) SET n.attributes = $attrs","params":{"uuid":"entity-0","attrs":"{\"updated\":true}"}}
