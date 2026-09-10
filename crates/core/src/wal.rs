@@ -867,7 +867,7 @@ const TAIL_READ_WINDOW: u64 = 256 * 1024;
 /// Removes every [`VECTOR_PARAM_KEYS`] entry from `params` (issue #526, FR-001). A no-op when
 /// `params` isn't a JSON object (e.g. `Value::Null`, recorded by `Conn::raw_query` for
 /// non-parameterized DDL) or carries none of these keys.
-fn strip_vector_params(params: serde_json::Value) -> serde_json::Value {
+pub(crate) fn strip_vector_params(params: serde_json::Value) -> serde_json::Value {
     match params {
         serde_json::Value::Object(mut map) => {
             for key in VECTOR_PARAM_KEYS {

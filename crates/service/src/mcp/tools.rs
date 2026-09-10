@@ -793,7 +793,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (12) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (14) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -813,6 +813,51 @@ pub fn registry() -> Vec<ToolSpec> {
                         "target_dir": {
                             "type": "string",
                             "description": "Output directory. Must not exist or must be empty. Defaults to <workspace>/.lcg/wal-compacted/."
+                        }
+                    }
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_strip_wal_embeddings",
+            description: "Rewrite every qualifying on-disk WAL file in place, removing \
+                           embedding-vector params fields (name_embedding, fact_embedding, \
+                           content_embedding, summary_embedding) while leaving every other \
+                           field, record ordering, and sequence number untouched. 0.14.0 \
+                           stopped writing these vectors to the WAL and made replay ignore any \
+                           vector found in an older WAL — so a pre-0.14 WAL carries ~90% inert \
+                           bytes (measured 89.9% on the reference corpus) this operation \
+                           reclaims without changing what replay does. Idempotent: re-running \
+                           on an already-stripped WAL (or one that never had vectors) is a \
+                           zero-I/O no-op — zero files modified, byte-identical, mtime \
+                           unchanged. Crash-safe per file: each file needing a rewrite is \
+                           written to a temporary file in the same directory and atomically \
+                           renamed over the original only once fully flushed; an interrupted run \
+                           leaves the original file intact and a subsequent run resumes cleanly. \
+                           A record whose embedding-vector value is malformed (not a well-formed \
+                           JSON number array) is a per-file error: that file is left completely \
+                           untouched and reported in `errors`, while every other file is still \
+                           processed. Deliberately out of scope: a vector inlined as a raw \
+                           Cypher literal (no params key to remove) is not reachable by this \
+                           key-removal strategy and is left as-is, matching ADR-0526's existing \
+                           precedent for that shape.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "description": "Restrict stripping to a single group's own WAL \
+                                             directory (issue #378). Omit to process every \
+                                             group directory under the WAL root, plus any \
+                                             legacy flat-layout files at the root itself."
+                        },
+                        "dry_run": {
+                            "type": "boolean", "default": false,
+                            "description": "Compute the same statistics (files that would be \
+                                             rewritten, bytes that would be reclaimed, records \
+                                             that would be touched) without modifying any file."
                         }
                     }
                 })
@@ -1186,11 +1231,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_43_unique_tools() {
+    fn registry_has_44_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 43);
+        assert_eq!(r.len(), 44);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 43, "tool names must be unique");
+        assert_eq!(names.len(), 44, "tool names must be unique");
     }
 
     #[test]
@@ -1200,7 +1245,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 14);
         assert_eq!(count(Scope::Write), 15);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 13);
+        assert_eq!(count(Scope::Admin), 14);
     }
 
     #[test]

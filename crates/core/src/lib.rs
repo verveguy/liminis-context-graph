@@ -40,6 +40,7 @@ pub mod wal;
 pub(crate) mod wal_exec;
 pub mod wal_generation;
 pub mod wal_group;
+pub mod wal_strip;
 
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
