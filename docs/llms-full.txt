@@ -730,11 +730,11 @@ no graph logic is duplicated between them:
 - **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (44)
+## IPC methods (45)
 
-The socket dispatch handles **44 methods**: 43 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **45 methods**: 44 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (44) and the MCP tool registry (43, below) differ by exactly one — `health_check` is
+surface (45) and the MCP tool registry (44, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -750,7 +750,7 @@ not exposed as an MCP tool.
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
 | Semantic search maintenance | `knowledge_backfill_summary_embeddings` |
 | Cross-group pointers | `knowledge_add_cross_group_edge`, `knowledge_rebind_pointers` |
-| WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
+| WAL administration | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
 For request/response shapes and parameter details, the dispatch `match` arms in
@@ -866,7 +866,7 @@ union of all active scopes.
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings` |
+| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -885,7 +885,9 @@ the remote service.
 
 **Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild one group's data
 from its own WAL directory — `group_id`, default `"liminis"`), `knowledge_dump_wal`
-(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_wal_mark_create` /
+(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_strip_wal_embeddings`
+(rewrite existing WAL files in place to remove the embedding-vector `params` fields a pre-0.14
+WAL still carries — see [Operations](operations.md#wal-administration)), `knowledge_wal_mark_create` /
 `_list` / `_delete` (name a retained WAL position within one group's stream, without a full
 snapshot — each also takes `group_id`, default `"liminis"`, and `_list` reports only that one
 group's marks, never an aggregate across groups), and `knowledge_recover` / `knowledge_recover_full`
@@ -2056,6 +2058,31 @@ the running embedder — a database-side check, not a property of the WAL or the
   the same reason, the output always gets a freshly minted generation (issue #387) — never the
   source's: it is a new stream, not a copy of the source's identity, so a consumer must not treat
   it as "the same stream" it was tracking before.
+- **Strip embedding vectors from a pre-0.14 WAL** with `knowledge_strip_wal_embeddings
+  {group_id, dry_run}` (issue #577). 0.14.0 stopped *writing* embedding vectors to the WAL and
+  made replay ignore any vector it finds in an older WAL (see above) — this operation reclaims
+  the space a WAL written before that change is still carrying, by rewriting every qualifying
+  `.jsonl` file in place to remove `params` entries keyed by an embedding-column name
+  (`name_embedding`, `fact_embedding`, `content_embedding`, `summary_embedding`), leaving every
+  other field, record ordering, and sequence number untouched. Because replay never reads a
+  stored vector regardless of whether it's present, this is pure reclamation: it cannot change
+  what a rebuild produces. `group_id` scopes the operation to one group's own WAL directory;
+  omit it to process every group directory under the WAL root plus any legacy flat-layout files
+  at the root itself. Idempotent: re-running against an already-stripped WAL (or one that never
+  had vectors, i.e. anything written entirely by 0.14.x) is a zero-I/O no-op — no file is opened
+  for writing, so bytes and mtime are left exactly as they were. Crash-safe per file: each file
+  needing a rewrite is written to a temporary file in the same directory and atomically renamed
+  over the original only once fully flushed, so an interrupted run leaves every already-rewritten
+  file replaced, the in-flight file's original intact, and a subsequent run resumes cleanly. A
+  record whose embedding-vector value is malformed (not a well-formed JSON array of numbers) is
+  reported as a per-file error — that file is left completely untouched, and every other file is
+  still processed. Pass `dry_run: true` to preview the same statistics (files that would be
+  rewritten, bytes that would be reclaimed, records that would be touched) without modifying
+  anything. Reachable even when the database is degraded or unavailable, since it only touches
+  the WAL directory on disk. Deliberately out of scope: a vector inlined as a raw Cypher literal
+  rather than a `params` entry (see [ADR-0526](adr/0526-vectors-are-a-local-cache.md)'s
+  externally-produced-content edge case) has no `params` key to remove and is left as-is. See
+  [ADR-0577](adr/0577-strip-wal-embeddings.md) for the full design.
 - **Name a known-good position** with `knowledge_wal_mark_create {name, group_id}` (`group_id`
   defaults to `"liminis"`) — a lightweight alternative to a full `knowledge_dump_wal` snapshot
   when all you need is a durable pointer back to "this group's stream was good here," not a
@@ -2456,9 +2483,10 @@ bridge and the list of operations that support it.
 
 ## Recovery and export tools
 
-`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`,
-`knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`,
-`knowledge_recover`, and `knowledge_recover_full` are all `admin`-scope IPC/MCP tools — see
+`knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`,
+`knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`,
+`knowledge_rebuild_from_wal`, `knowledge_recover`, and `knowledge_recover_full` are all
+`admin`-scope IPC/MCP tools — see
 [Scopes](ipc-mcp-reference.md#scopes) for the full admin-scope list and the MCP `--scope` flag.
 
 ---
@@ -3759,6 +3787,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
 | [0559](0559-bundle-lbug-extensions.md) | Bundle lbug vector/fts extensions so startup never downloads from the CDN | 2026-09-05 |
 | [0575](0575-lazy-connect-for-attached-mcp-stdio.md) | Lazy-Dial the Attached `--connect` Socket by Default, With `--connect-eager` Opt-Out | 2026-09-09 |
+| [0577](0577-strip-wal-embeddings.md) | `knowledge_strip_wal_embeddings` — Two-Pass In-Place Stripping of Pre-0.14 WAL Vectors | 2026-09-09 |
 
 ## Historical numbering
 
