@@ -14,6 +14,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -358,7 +359,10 @@ fn transform_line(raw: &[u8], line_no: usize, file_path: &Path) -> Result<LineOu
     // Validate the line has WalLine's required shape (seq/ts/db/cypher/params, correctly typed)
     // before touching anything — this keeps `unparseable` semantics identical to a direct
     // `WalLine` parse, without requiring the *rewrite* below to go through the typed struct.
-    if serde_json::from_value::<WalLine>(value.clone()).is_err() {
+    // Deserializes from a borrow (`&Value` implements `serde::Deserializer`), not a clone: this
+    // runs on every line of every file, including files that need no rewrite at all, so avoiding
+    // an allocation here matters for the scan pass's cost on large WALs.
+    if WalLine::deserialize(&value).is_err() {
         return Ok(LineOutcome {
             output: raw.to_vec(),
             rewritten: false,
