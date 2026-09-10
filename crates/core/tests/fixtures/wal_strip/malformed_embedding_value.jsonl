@@ -1,0 +1,1 @@
+{"seq":0,"ts":"2026-06-01T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, n.name_embedding = $name_embedding","params":{"uuid":"entity-0","name":"Entity Zero","name_embedding":"truncated-not-an-array"}}

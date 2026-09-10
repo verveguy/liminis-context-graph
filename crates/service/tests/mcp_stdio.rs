@@ -43,8 +43,8 @@ fn standalone_lists_and_calls_read_and_write_tools() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        43,
-        "default --scope=all should advertise all 43 tools"
+        44,
+        "default --scope=all should advertise all 44 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
@@ -192,9 +192,10 @@ fn scope_admin_advertises_wal_lifecycle_tools() {
 
     let tools = client.list_tools();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 14);
     for expected in [
         "knowledge_dump_wal",
+        "knowledge_strip_wal_embeddings",
         "knowledge_prepare_checkpoint",
         "knowledge_wal_mark_create",
         "knowledge_wal_mark_list",
@@ -243,7 +244,7 @@ fn scope_union_advertises_both_sets() {
     client.initialize();
 
     let tools = client.list_tools();
-    assert_eq!(tools.len(), 27, "read(14) + admin(13) = 27");
+    assert_eq!(tools.len(), 28, "read(14) + admin(14) = 28");
 
     client.shutdown();
 }

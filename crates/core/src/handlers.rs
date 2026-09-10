@@ -96,6 +96,10 @@ async fn handle(
             // applied_seq, which requires an open DB.
             | "knowledge_wal_mark_list"
             | "knowledge_wal_mark_delete"
+            // knowledge_strip_wal_embeddings (issue #577): touches only state.wal_root and
+            // state.write_lock, never the DB — a pure filesystem transform, same rationale as
+            // the wal_mark_* pair above.
+            | "knowledge_strip_wal_embeddings"
     );
     if !exempt_in_degraded && state.db.load_full().is_none() {
         let reason = state
@@ -127,6 +131,7 @@ async fn handle(
         "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
+        "knowledge_strip_wal_embeddings" => handle_strip_wal_embeddings(req, state).await,
         "knowledge_wal_mark_create" => handle_wal_mark_create(req, state).await,
         "knowledge_wal_mark_list" => handle_wal_mark_list(req, state).await,
         "knowledge_wal_mark_delete" => handle_wal_mark_delete(req, state).await,
@@ -1922,6 +1927,69 @@ fn count_jsonl_files_in_dir(dir: &std::path::Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+// FR-014: callers must add knowledge_strip_wal_embeddings to service_protocol.py in the
+// liminis-app repo.
+//
+// Filesystem-only (no DB access): degraded-mode exempt, see `exempt_in_degraded` above.
+async fn handle_strip_wal_embeddings(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = p["group_id"].as_str().map(|s| s.to_string());
+    let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+
+    let wal_root = state
+        .wal_root
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+
+    // Write lock held for the whole operation (FR-008): excludes a concurrent
+    // knowledge_process_chunk or a second concurrent invocation of this same tool from
+    // interleaving with the in-place rewrite, matching knowledge_dump_wal/
+    // knowledge_prepare_checkpoint's existing whole-WAL-directory locking discipline.
+    let _guard = state.write_lock.write().await;
+
+    let report = tokio::task::spawn_blocking(move || {
+        crate::wal_strip::strip_wal_embeddings(&wal_root, group_id.as_deref(), dry_run)
+    })
+    .await
+    .map_err(|e| {
+        Error::Ipc(format!(
+            "knowledge_strip_wal_embeddings: spawn_blocking panicked: {e}"
+        ))
+    })??;
+
+    // Resync any live WalWriter's cached bytes_in_current_file before releasing write_lock:
+    // a rewrite may have shrunk a group's currently-open file out from under its in-memory
+    // counter (review finding on PR #578), which nothing above excludes it from since the
+    // strip processes every .jsonl file, including one a writer in this process has open.
+    // Cheap even when nothing changed (bounded by live-writer count, not WAL size), so it's
+    // unconditional here rather than gated on files_rewritten > 0.
+    if !report.dry_run {
+        if let Ok(mut writers) = state.wal_writers.lock() {
+            for writer in writers.values_mut() {
+                writer.resync_current_file_bytes();
+            }
+        }
+    }
+
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "dry_run": report.dry_run,
+        "files_processed": report.files_processed,
+        "files_rewritten": report.files_rewritten,
+        "files_unchanged": report.files_unchanged,
+        "bytes_before": report.bytes_before,
+        "bytes_after": report.bytes_after,
+        "records_rewritten": report.records_rewritten,
+        "unparseable_lines": report.unparseable_lines,
+        "errors": report.errors,
+    }))
 }
 
 async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error> {

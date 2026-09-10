@@ -190,6 +190,31 @@ the running embedder — a database-side check, not a property of the WAL or the
   the same reason, the output always gets a freshly minted generation (issue #387) — never the
   source's: it is a new stream, not a copy of the source's identity, so a consumer must not treat
   it as "the same stream" it was tracking before.
+- **Strip embedding vectors from a pre-0.14 WAL** with `knowledge_strip_wal_embeddings
+  {group_id, dry_run}` (issue #577). 0.14.0 stopped *writing* embedding vectors to the WAL and
+  made replay ignore any vector it finds in an older WAL (see above) — this operation reclaims
+  the space a WAL written before that change is still carrying, by rewriting every qualifying
+  `.jsonl` file in place to remove `params` entries keyed by an embedding-column name
+  (`name_embedding`, `fact_embedding`, `content_embedding`, `summary_embedding`), leaving every
+  other field, record ordering, and sequence number untouched. Because replay never reads a
+  stored vector regardless of whether it's present, this is pure reclamation: it cannot change
+  what a rebuild produces. `group_id` scopes the operation to one group's own WAL directory;
+  omit it to process every group directory under the WAL root plus any legacy flat-layout files
+  at the root itself. Idempotent: re-running against an already-stripped WAL (or one that never
+  had vectors, i.e. anything written entirely by 0.14.x) is a zero-I/O no-op — no file is opened
+  for writing, so bytes and mtime are left exactly as they were. Crash-safe per file: each file
+  needing a rewrite is written to a temporary file in the same directory and atomically renamed
+  over the original only once fully flushed, so an interrupted run leaves every already-rewritten
+  file replaced, the in-flight file's original intact, and a subsequent run resumes cleanly. A
+  record whose embedding-vector value is malformed (not a well-formed JSON array of numbers) is
+  reported as a per-file error — that file is left completely untouched, and every other file is
+  still processed. Pass `dry_run: true` to preview the same statistics (files that would be
+  rewritten, bytes that would be reclaimed, records that would be touched) without modifying
+  anything. Reachable even when the database is degraded or unavailable, since it only touches
+  the WAL directory on disk. Deliberately out of scope: a vector inlined as a raw Cypher literal
+  rather than a `params` entry (see [ADR-0526](adr/0526-vectors-are-a-local-cache.md)'s
+  externally-produced-content edge case) has no `params` key to remove and is left as-is. See
+  [ADR-0577](adr/0577-strip-wal-embeddings.md) for the full design.
 - **Name a known-good position** with `knowledge_wal_mark_create {name, group_id}` (`group_id`
   defaults to `"liminis"`) — a lightweight alternative to a full `knowledge_dump_wal` snapshot
   when all you need is a durable pointer back to "this group's stream was good here," not a
@@ -590,7 +615,8 @@ bridge and the list of operations that support it.
 
 ## Recovery and export tools
 
-`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`,
-`knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`,
-`knowledge_recover`, and `knowledge_recover_full` are all `admin`-scope IPC/MCP tools — see
+`knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`,
+`knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`,
+`knowledge_rebuild_from_wal`, `knowledge_recover`, and `knowledge_recover_full` are all
+`admin`-scope IPC/MCP tools — see
 [Scopes](ipc-mcp-reference.md#scopes) for the full admin-scope list and the MCP `--scope` flag.

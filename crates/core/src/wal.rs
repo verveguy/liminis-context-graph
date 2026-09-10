@@ -282,6 +282,25 @@ impl WalWriter {
         self.last_rotation.take()
     }
 
+    /// Re-reads the currently-open file's on-disk size and resyncs `bytes_in_current_file` to
+    /// match. `bytes_in_current_file` is otherwise only ever updated by this writer's own
+    /// appends (`flush_pending`), so an out-of-band rewrite of the same file by another
+    /// operation in this process — namely `knowledge_strip_wal_embeddings`, which can target a
+    /// group's currently-open file since nothing excludes it from the `.jsonl` glob — leaves the
+    /// cached count stale (too large, since stripping only ever shrinks a file). A stale count
+    /// doesn't lose data (appends still land correctly by path) but drifts `max_bytes_per_file`
+    /// rotation decisions, rotating earlier than configured until the next natural rotation
+    /// resets it. A no-op if no file is open yet, or if the file is unexpectedly missing
+    /// (defensive; the caller holds `write_lock` for the duration of both the strip and this
+    /// call, so this should not happen in practice).
+    pub(crate) fn resync_current_file_bytes(&mut self) {
+        if let Some(path) = &self.current_file {
+            if let Ok(meta) = fs::metadata(path) {
+                self.bytes_in_current_file = meta.len();
+            }
+        }
+    }
+
     /// Returns pending line count (for tests).
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
@@ -867,7 +886,7 @@ const TAIL_READ_WINDOW: u64 = 256 * 1024;
 /// Removes every [`VECTOR_PARAM_KEYS`] entry from `params` (issue #526, FR-001). A no-op when
 /// `params` isn't a JSON object (e.g. `Value::Null`, recorded by `Conn::raw_query` for
 /// non-parameterized DDL) or carries none of these keys.
-fn strip_vector_params(params: serde_json::Value) -> serde_json::Value {
+pub(crate) fn strip_vector_params(params: serde_json::Value) -> serde_json::Value {
     match params {
         serde_json::Value::Object(mut map) => {
             for key in VECTOR_PARAM_KEYS {
@@ -1938,5 +1957,50 @@ mod tests {
 
         let writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
         assert_eq!(writer.generation(), Some(expected.as_str()));
+    }
+
+    // ── resync_current_file_bytes (issue #577 review finding) ──────────────────────────────
+
+    #[test]
+    fn resync_current_file_bytes_is_a_no_op_before_any_file_is_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        writer.resync_current_file_bytes();
+        assert_eq!(writer.bytes_in_current_file, 0);
+        assert!(writer.current_file.is_none());
+    }
+
+    #[test]
+    fn resync_current_file_bytes_picks_up_an_out_of_band_shrink() {
+        // Models `knowledge_strip_wal_embeddings` rewriting a group's currently-open file out
+        // from under this writer's cached byte count: the writer's own append is the only
+        // thing that normally updates `bytes_in_current_file`, so an external rewrite that
+        // shrinks the file leaves the cached count stale until something re-stats it.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        writer
+            .with_chunk(|w| {
+                w.log_mutation(
+                    "MERGE (n:Entity {uuid: $uuid})",
+                    serde_json::json!({ "uuid": "e1" }),
+                    "test",
+                )
+            })
+            .unwrap();
+
+        let path = writer.current_file.clone().unwrap();
+        let original_len = fs::metadata(&path).unwrap().len();
+        assert_eq!(writer.bytes_in_current_file, original_len);
+
+        // Simulate an external in-place rewrite that shrinks the file (e.g. an embedding-
+        // stripping rewrite of a file that happened to also carry a vector elsewhere).
+        fs::write(&path, b"x\n").unwrap();
+        assert_ne!(
+            fs::metadata(&path).unwrap().len(),
+            writer.bytes_in_current_file
+        );
+
+        writer.resync_current_file_bytes();
+        assert_eq!(writer.bytes_in_current_file, 2);
     }
 }
