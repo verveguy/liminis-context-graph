@@ -104,11 +104,28 @@ pub fn strip_wal_embeddings(
             }
         };
 
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
-            .collect();
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => {
+                    let p = e.path();
+                    if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                        files.push(p);
+                    }
+                }
+                Err(e) => {
+                    // A per-entry enumeration failure (e.g. a permission-restricted or
+                    // transiently-unreadable entry alongside otherwise-readable ones) is reported
+                    // against the directory, not silently dropped — matching the "read-only or
+                    // permission-restricted WAL directory or file" edge case's per-path error
+                    // contract, which otherwise only covered `fs::read_dir`'s own top-level error.
+                    report.errors.push(StripFileError {
+                        path: dir.display().to_string(),
+                        error: format!("failed to read a directory entry: {e}"),
+                    });
+                }
+            }
+        }
         files.sort();
 
         for file in files {
