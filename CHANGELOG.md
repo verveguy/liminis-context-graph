@@ -9,6 +9,49 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-10
+
+A maintenance release: the MCP front-end no longer hard-fails when the daemon is down, and a new
+admin operation reclaims the dead weight a pre-0.14 WAL is still carrying. No migration, no API
+changes.
+
+### Added
+
+- **`knowledge_strip_wal_embeddings {group_id, dry_run}`** reclaims the space a WAL written before
+  0.14.0 still carries. 0.14.0 stopped *writing* embedding vectors to the WAL and made replay
+  ignore any it finds, but left existing WALs untouched — on the reference corpus those vectors
+  were **89.9% of WAL bytes**, parsed and discarded on every replay, rebuild and hydration. This
+  rewrites each qualifying `.jsonl` in place to drop `params` entries keyed by an embedding column,
+  leaving every other field, record ordering and sequence number alone. Because replay never reads
+  a stored vector, it cannot change what a rebuild produces. Idempotent (a re-run is a zero-I/O
+  no-op), crash-safe per file (tmp-then-atomic-rename), and `dry_run` reports what would change
+  without touching anything. `admin` scope. See
+  [ADR-0577](docs/adr/0577-strip-wal-embeddings.md) (#577).
+- **`--connect-eager`** restores the pre-0.14.2 startup behaviour for `--mcp-stdio --connect` —
+  dial at startup and exit if the socket is unreachable — for operators relying on that as a
+  health-check signal (#575).
+
+### Fixed
+
+- **`--mcp-stdio --connect` no longer hard-fails when the daemon socket is unreachable at launch.**
+  `initialize` and `tools/list` now complete immediately from the compiled-in tool registry without
+  dialling; the first `tools/call` dials lazily, and an unreachable daemon returns a tool result
+  with `isError: true` naming the socket rather than exiting. A later call succeeds once the daemon
+  comes up, and a daemon restart that rebinds the socket is transparently re-dialled — both without
+  any client-side reconnect. Previously the client cached the failed attach for roughly 15 minutes,
+  leaving the reader showing *disconnected* long after the cause was fixed, and a restart orphaned
+  live connections until a manual `/mcp`. Reported from downstream MCP use (#574). `--scope`
+  enforcement is unchanged. See
+  [ADR-0575](docs/adr/0575-lazy-connect-for-attached-mcp-stdio.md) (#575).
+
+### Internal
+
+- Corrected a false claim in the 0.14.0 release notes that lbug 0.18.1 carries `ladybug#845`,
+  `#837` and `#864`. Those landed in 0.20.x, after 0.18.1 shipped; the document had said both
+  things in different sections. `ladybug#845` is FTS heap corruption on a path this project
+  queries concurrently, so the error understated a known risk. Moving to 0.20.2 is tracked in
+  #561 (#569).
+
 ## [0.14.1] - 2026-09-06
 
 A maintenance release: startup no longer depends on a third-party CDN, and two unbounded-wait
