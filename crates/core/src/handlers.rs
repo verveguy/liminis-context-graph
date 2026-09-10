@@ -1962,6 +1962,20 @@ async fn handle_strip_wal_embeddings(
         ))
     })??;
 
+    // Resync any live WalWriter's cached bytes_in_current_file before releasing write_lock:
+    // a rewrite may have shrunk a group's currently-open file out from under its in-memory
+    // counter (review finding on PR #578), which nothing above excludes it from since the
+    // strip processes every .jsonl file, including one a writer in this process has open.
+    // Cheap even when nothing changed (bounded by live-writer count, not WAL size), so it's
+    // unconditional here rather than gated on files_rewritten > 0.
+    if !report.dry_run {
+        if let Ok(mut writers) = state.wal_writers.lock() {
+            for writer in writers.values_mut() {
+                writer.resync_current_file_bytes();
+            }
+        }
+    }
+
     drop(_guard);
 
     Ok(json!({

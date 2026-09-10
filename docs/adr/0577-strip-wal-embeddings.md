@@ -123,7 +123,33 @@ filesystem operation — no new locking primitive is introduced. This excludes b
 `knowledge_process_chunk` (or any other live write) and a second concurrent invocation of this
 same tool from interleaving with the in-place rewrite.
 
-### 8. The literal-inlined-vector shape stays explicitly out of scope
+### 8. Resyncing a live writer's rotation bookkeeping after a rewrite
+
+The write lock (Decision 7) only excludes a concurrent write from interleaving with a rewrite in
+progress; it doesn't, by itself, keep a live `WalWriter`'s in-memory `bytes_in_current_file`
+counter (`wal.rs`) in sync with the file it just rewrote. Nothing excludes a group's
+currently-open file from this operation's `.jsonl` glob, so if that file needed stripping, it
+shrinks on disk while the writer's cached count — updated only by the writer's own appends —
+stays at the pre-strip size. Left alone, this doesn't lose data (the writer still appends
+correctly by path), but it drifts `max_bytes_per_file` rotation decisions, rotating earlier than
+configured until the next natural rotation resets the counter from zero.
+
+The fix is `WalWriter::resync_current_file_bytes`, called on every live writer in
+`state.wal_writers` from `handle_strip_wal_embeddings` after the rewrite pass completes and before
+`write_lock` is released — it re-`stat`s the writer's `current_file` (if any) and overwrites
+`bytes_in_current_file` with the actual on-disk length. It's unconditional (not gated on which
+group was touched) because it's cheap — bounded by the number of live writers in this process, not
+WAL size — and correct as a no-op when nothing changed. Under the current write path this drift is
+not actually reachable today: `WalWriter::log_mutation` strips every `VECTOR_PARAM_KEYS` entry
+before a line is ever buffered (issue #526), and a freshly-constructed writer always opens a brand
+new, timestamped file rather than resuming an existing one — so a live writer's own `current_file`
+can never itself contain an embedding for this operation to strip. The resync is deliberately
+unconditional and cheap defensive-in-depth against that invariant changing (e.g. a future
+WAL-resume-on-restart feature) rather than something this issue's tests can trigger end-to-end
+through today's write path; `wal.rs`'s own unit tests cover the mechanism directly by simulating an
+out-of-band shrink of a writer's open file.
+
+### 9. The literal-inlined-vector shape stays explicitly out of scope
 
 ADR-0526 § Decision 4 already confirmed one WAL shape this key-removal strategy cannot reach: an
 externally-produced (Python/graphiti-driver) `CREATE` line that inlines a vector as a raw Cypher
