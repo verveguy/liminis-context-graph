@@ -469,7 +469,10 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(entries.len(), 1, "no tmp file should have been created");
         assert_eq!(fs::read(&path).unwrap(), before_bytes);
-        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before_mtime);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            before_mtime
+        );
     }
 
     #[test]
@@ -486,7 +489,11 @@ mod tests {
         assert_eq!(report.files_unchanged, 0);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].error.contains("name_embedding"));
-        assert_eq!(fs::read(&path).unwrap(), before_bytes, "file must be untouched on error");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before_bytes,
+            "file must be untouched on error"
+        );
 
         // No leftover tmp file either.
         let entries: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
@@ -532,7 +539,11 @@ mod tests {
         assert_eq!(report.records_rewritten, 1);
         assert!(report.bytes_after < report.bytes_before);
 
-        assert_eq!(fs::read(&path).unwrap(), before_bytes, "dry_run must not touch the file");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before_bytes,
+            "dry_run must not touch the file"
+        );
         let entries: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(entries.len(), 1, "dry_run must never create a tmp file");
     }
@@ -558,7 +569,11 @@ mod tests {
         // group-b's file must be untouched.
         let b_content = fs::read_to_string(group_b.join("0000.jsonl")).unwrap();
         let parsed: WalLine = serde_json::from_str(b_content.trim()).unwrap();
-        assert!(parsed.params.as_object().unwrap().contains_key("summary_embedding"));
+        assert!(parsed
+            .params
+            .as_object()
+            .unwrap()
+            .contains_key("summary_embedding"));
     }
 
     #[test]

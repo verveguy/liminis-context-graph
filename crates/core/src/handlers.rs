@@ -1933,7 +1933,10 @@ fn count_jsonl_files_in_dir(dir: &std::path::Path) -> usize {
 // liminis-app repo.
 //
 // Filesystem-only (no DB access): degraded-mode exempt, see `exempt_in_degraded` above.
-async fn handle_strip_wal_embeddings(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+async fn handle_strip_wal_embeddings(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
     let p = &req.params;
     let group_id = p["group_id"].as_str().map(|s| s.to_string());
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);

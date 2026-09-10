@@ -119,7 +119,10 @@ async fn strips_embeddings_preserves_other_fields_and_reports_stats() {
     // attribute update) has none.
     assert_eq!(v["result"]["records_rewritten"], 3, "{v}");
     assert_eq!(v["result"]["bytes_before"], before_bytes, "{v}");
-    assert!(v["result"]["bytes_after"].as_u64().unwrap() < before_bytes, "{v}");
+    assert!(
+        v["result"]["bytes_after"].as_u64().unwrap() < before_bytes,
+        "{v}"
+    );
     assert!(v["result"]["errors"].as_array().unwrap().is_empty(), "{v}");
 
     let content = std::fs::read_to_string(&path).unwrap();
@@ -127,10 +130,16 @@ async fn strips_embeddings_preserves_other_fields_and_reports_stats() {
     assert_eq!(lines.len(), 4, "record count/ordering must be preserved");
     for (i, line) in lines.iter().enumerate() {
         let wal_line: WalLine = serde_json::from_str(line).unwrap();
-        assert_eq!(wal_line.seq, i as u64, "sequence numbers must be preserved exactly");
+        assert_eq!(
+            wal_line.seq, i as u64,
+            "sequence numbers must be preserved exactly"
+        );
         let params = wal_line.params.as_object().unwrap();
         for key in VECTOR_PARAM_KEYS {
-            assert!(!params.contains_key(*key), "line {i} still carries {key:?}: {line}");
+            assert!(
+                !params.contains_key(*key),
+                "line {i} still carries {key:?}: {line}"
+            );
         }
     }
     // Every non-embedding field survives untouched.
@@ -150,8 +159,13 @@ async fn rerun_after_strip_is_a_byte_identical_noop() {
     let path = copy_fixture_into("mixed_embedding_params.jsonl", &group);
 
     let state = make_state(Some(wal_dir.path().to_path_buf()));
-    let first = dispatch_val(1, "knowledge_strip_wal_embeddings", json!({}), Arc::clone(&state))
-        .await;
+    let first = dispatch_val(
+        1,
+        "knowledge_strip_wal_embeddings",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
     assert_eq!(first["result"]["files_rewritten"], 1, "{first}");
 
     let bytes_after_first = std::fs::read(&path).unwrap();
@@ -162,7 +176,10 @@ async fn rerun_after_strip_is_a_byte_identical_noop() {
     assert_eq!(second["result"]["files_rewritten"], 0, "{second}");
     assert_eq!(second["result"]["files_unchanged"], 1, "{second}");
     assert_eq!(second["result"]["records_rewritten"], 0, "{second}");
-    assert!(second["result"]["errors"].as_array().unwrap().is_empty(), "{second}");
+    assert!(
+        second["result"]["errors"].as_array().unwrap().is_empty(),
+        "{second}"
+    );
 
     assert_eq!(
         std::fs::read(&path).unwrap(),
@@ -230,7 +247,10 @@ async fn malformed_embedding_value_is_a_per_file_error_and_other_files_still_pro
         "{v}"
     );
     assert!(
-        errors[0]["error"].as_str().unwrap().contains("name_embedding"),
+        errors[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("name_embedding"),
         "{v}"
     );
     assert_eq!(
@@ -288,7 +308,8 @@ async fn dry_run_reports_would_be_stats_without_mutating_anything() {
     assert_eq!(v["result"]["files_rewritten"], 1, "{v}");
     assert_eq!(v["result"]["records_rewritten"], 3, "{v}");
     assert!(
-        v["result"]["bytes_after"].as_u64().unwrap() < v["result"]["bytes_before"].as_u64().unwrap(),
+        v["result"]["bytes_after"].as_u64().unwrap()
+            < v["result"]["bytes_before"].as_u64().unwrap(),
         "{v}"
     );
 
@@ -442,7 +463,10 @@ async fn strip_reduces_real_corpus_bytes_by_close_to_89_9_percent_and_replays_id
     let dim = real_corpus_embedding_dim();
     let original_dir = real_corpus_wal_dir();
     let original_bytes = total_bytes(&original_dir);
-    assert!(original_bytes > 0, "the #217 capture fixture must be non-empty");
+    assert!(
+        original_bytes > 0,
+        "the #217 capture fixture must be non-empty"
+    );
 
     // Two independent copies: one left untouched (replayed as "original"), one stripped in
     // place by the operation under test (replayed as "stripped"). Never mutates the
@@ -479,8 +503,8 @@ async fn strip_reduces_real_corpus_bytes_by_close_to_89_9_percent_and_replays_id
     let embed_fn = || lcg_core::zero_vector_embed_fn(dim);
 
     let original_db_dir = TempDir::new().unwrap();
-    let original_db = Db::open(original_db_dir.path().join("original.db").to_str().unwrap())
-        .unwrap();
+    let original_db =
+        Db::open(original_db_dir.path().join("original.db").to_str().unwrap()).unwrap();
     let original_conn = original_db.connect().unwrap();
     original_conn.init_schema(dim).unwrap();
     let original_stats = WalReplayer::new(untouched_dir.path())
@@ -488,16 +512,22 @@ async fn strip_reduces_real_corpus_bytes_by_close_to_89_9_percent_and_replays_id
         .expect("replay of the original capture must succeed");
 
     let stripped_db_dir = TempDir::new().unwrap();
-    let stripped_db = Db::open(stripped_db_dir.path().join("stripped.db").to_str().unwrap())
-        .unwrap();
+    let stripped_db =
+        Db::open(stripped_db_dir.path().join("stripped.db").to_str().unwrap()).unwrap();
     let stripped_conn = stripped_db.connect().unwrap();
     stripped_conn.init_schema(dim).unwrap();
     let stripped_stats = WalReplayer::new(&stripped_group_dir)
         .replay(&stripped_conn, embed_fn(), dim)
         .expect("replay of the stripped capture must succeed");
 
-    assert_eq!(original_stats.failed_lines, 0, "original replay must be clean");
-    assert_eq!(stripped_stats.failed_lines, 0, "stripped replay must be clean");
+    assert_eq!(
+        original_stats.failed_lines, 0,
+        "original replay must be clean"
+    );
+    assert_eq!(
+        stripped_stats.failed_lines, 0,
+        "stripped replay must be clean"
+    );
     assert_eq!(
         original_stats.lines_replayed, stripped_stats.lines_replayed,
         "stripping must not change how many mutations replay applies"
