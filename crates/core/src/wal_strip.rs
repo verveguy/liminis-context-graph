@@ -309,9 +309,14 @@ struct LineOutcome {
 /// - A line whose `params` holds an embedding-vector key with a value that is not a well-formed
 ///   JSON array of numbers is malformed (FR-009): returns `Err`, which the caller propagates to
 ///   abort the whole file before anything is written.
-/// - Otherwise the line is rewritten: [`strip_vector_params`] removes every embedding-vector key
-///   and the result is re-serialized (same field order, by [`WalLine`]'s struct declaration order
-///   and `serde_json`'s `preserve_order` feature for the remaining `params` keys).
+/// - Otherwise the line is rewritten: the originally-parsed generic [`Value`] has its `"params"`
+///   slot replaced in place by [`strip_vector_params`]'s result, then the whole `Value` is
+///   re-serialized. This is deliberately *not* done by deserializing into [`WalLine`] and
+///   re-serializing that struct: `WalLine` has no `deny_unknown_fields` and no catch-all field,
+///   so any top-level key it doesn't declare would be silently dropped by that round-trip.
+///   Mutating the parsed `Value` in place instead preserves every top-level key — including one
+///   `WalLine` doesn't know about — and its original relative order (`serde_json`'s
+///   `preserve_order` feature), since only the `"params"` entry's value is ever replaced.
 fn transform_line(raw: &[u8], line_no: usize, file_path: &Path) -> Result<LineOutcome, Error> {
     let has_trailing_newline = raw.last() == Some(&b'\n');
     let content = if has_trailing_newline {
@@ -339,8 +344,8 @@ fn transform_line(raw: &[u8], line_no: usize, file_path: &Path) -> Result<LineOu
         }
     };
 
-    let wal_line: WalLine = match serde_json::from_str(text) {
-        Ok(l) => l,
+    let mut value: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
         Err(_) => {
             return Ok(LineOutcome {
                 output: raw.to_vec(),
@@ -350,7 +355,18 @@ fn transform_line(raw: &[u8], line_no: usize, file_path: &Path) -> Result<LineOu
         }
     };
 
-    let Some(params_obj) = wal_line.params.as_object() else {
+    // Validate the line has WalLine's required shape (seq/ts/db/cypher/params, correctly typed)
+    // before touching anything — this keeps `unparseable` semantics identical to a direct
+    // `WalLine` parse, without requiring the *rewrite* below to go through the typed struct.
+    if serde_json::from_value::<WalLine>(value.clone()).is_err() {
+        return Ok(LineOutcome {
+            output: raw.to_vec(),
+            rewritten: false,
+            unparseable: true,
+        });
+    }
+
+    let Some(params_obj) = value.get("params").and_then(Value::as_object) else {
         return Ok(LineOutcome {
             output: raw.to_vec(),
             rewritten: false,
@@ -360,9 +376,9 @@ fn transform_line(raw: &[u8], line_no: usize, file_path: &Path) -> Result<LineOu
 
     let mut has_embedding_key = false;
     for key in VECTOR_PARAM_KEYS {
-        if let Some(value) = params_obj.get(*key) {
+        if let Some(v) = params_obj.get(*key) {
             has_embedding_key = true;
-            if !is_well_formed_number_array(value) {
+            if !is_well_formed_number_array(v) {
                 return Err(Error::Ipc(format!(
                     "{}: line {line_no}: embedding-vector param {key:?} is not a well-formed \
                      JSON array of numbers",
@@ -380,11 +396,14 @@ fn transform_line(raw: &[u8], line_no: usize, file_path: &Path) -> Result<LineOu
         });
     }
 
-    let stripped_line = WalLine {
-        params: strip_vector_params(wal_line.params),
-        ..wal_line
-    };
-    let mut output = serde_json::to_vec(&stripped_line)?;
+    let params_slot = value
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("params"))
+        .expect("presence and object-ness of \"params\" already confirmed above");
+    let owned_params = std::mem::take(params_slot);
+    *params_slot = strip_vector_params(owned_params);
+
+    let mut output = serde_json::to_vec(&value)?;
     if has_trailing_newline {
         output.push(b'\n');
     }
@@ -447,6 +466,31 @@ mod tests {
         assert!(!params.contains_key("name_embedding"));
         assert_eq!(params.get("x"), Some(&Value::from(1)));
         assert_eq!(params.get("other"), Some(&Value::from("kept")));
+    }
+
+    /// Regression test: a line with a top-level key `WalLine` doesn't declare must survive a
+    /// strip unchanged, not be silently dropped by round-tripping through the typed struct.
+    #[test]
+    fn strip_preserves_an_unknown_top_level_field_on_a_rewritten_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let line = r#"{"seq":0,"ts":"2026-01-01T00:00:00Z","db":"d","cypher":"MERGE (n) SET n.x=$x","params":{"x":1,"name_embedding":[0.1,0.2]},"schema_version":7}"#;
+        let path = write_lines(&group_dir(tmp.path()), "0000.jsonl", &[line]);
+
+        let report = strip_wal_embeddings(tmp.path(), None, false).unwrap();
+        assert_eq!(report.files_rewritten, 1);
+        assert_eq!(report.records_rewritten, 1);
+        assert!(report.errors.is_empty());
+
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(
+            value.get("schema_version"),
+            Some(&Value::from(7)),
+            "an unknown top-level field must survive a strip, not be silently dropped: {value}"
+        );
+        let params = value["params"].as_object().unwrap();
+        assert!(!params.contains_key("name_embedding"));
+        assert_eq!(params.get("x"), Some(&Value::from(1)));
     }
 
     #[test]
