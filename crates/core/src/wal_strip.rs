@@ -292,13 +292,24 @@ fn rewrite_file(path: &Path) -> Result<(), Error> {
     })();
 
     match result {
-        Ok(()) => {
-            fs::rename(&tmp_path, path)?;
-            Ok(())
-        }
+        Ok(()) => commit_or_cleanup(&tmp_path, path),
         Err(e) => {
             let _ = fs::remove_file(&tmp_path);
             Err(e)
+        }
+    }
+}
+
+/// Atomically replaces `path` with the fully-written `tmp_path`. If the rename itself fails
+/// (e.g. a transient permission error, or a concurrent process holding `path` open on some
+/// platforms), removes the tmp file rather than leaking it — `path` is left untouched either
+/// way, so this failure mode is never data loss, just an orphaned file if left uncleaned.
+fn commit_or_cleanup(tmp_path: &Path, path: &Path) -> Result<(), Error> {
+    match fs::rename(tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(tmp_path);
+            Err(e.into())
         }
     }
 }
@@ -656,5 +667,24 @@ mod tests {
         let report = strip_wal_embeddings(&missing, None, false).unwrap();
         assert_eq!(report.files_processed, 0);
         assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn commit_or_cleanup_removes_the_tmp_file_when_rename_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().join("victim.jsonl.abc123.tmp");
+        fs::write(&tmp_path, b"line\n").unwrap();
+        // A destination inside a nonexistent parent directory makes `fs::rename` fail (ENOENT)
+        // deterministically, without relying on platform-specific permission tricks — exercising
+        // the same failure family as a transient permission error on the real rename call.
+        let bogus_dest = tmp.path().join("does-not-exist").join("victim.jsonl");
+
+        let result = commit_or_cleanup(&tmp_path, &bogus_dest);
+
+        assert!(result.is_err());
+        assert!(
+            !tmp_path.exists(),
+            "tmp file must not be leaked when the atomic rename fails"
+        );
     }
 }
