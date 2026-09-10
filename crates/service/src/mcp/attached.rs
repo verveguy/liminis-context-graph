@@ -58,18 +58,40 @@ pub struct AttachedBackend {
 impl AttachedBackend {
     /// Connects once at startup. Fails fast (not hang) if the socket is missing or has no
     /// listener — `UnixStream::connect` returns immediately in both cases (ENOENT/ECONNREFUSED).
+    ///
+    /// Used by `--connect-eager` (issue #575): today's original behavior, kept byte-for-byte
+    /// unchanged so SC-004's parity guarantee holds. Prefer `new_lazy` for the default path.
     pub async fn connect(socket_path: &str) -> Result<Self, String> {
         let stream = Self::dial(socket_path).await?;
-        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
         Ok(Self {
             stream: Mutex::new(Some(stream)),
             socket_path: socket_path.to_string(),
             next_id: AtomicU64::new(1),
-            call_timeout: Duration::from_millis(call_timeout_ms),
+            call_timeout: Self::read_call_timeout(),
         })
+    }
+
+    /// Constructs a backend without dialling (issue #575, FR-001–FR-003): `initialize` and
+    /// `tools/list` can complete against an unreachable or not-yet-started daemon, since neither
+    /// touches `self.stream`. The first `tools/call` triggers `call()`'s existing
+    /// `guard.is_none()` lazy-redial branch (issue #213) — that branch already doesn't
+    /// distinguish "never dialed" from "known-dead after a prior failure," so no changes to
+    /// `call()` are needed to support this.
+    pub fn new_lazy(socket_path: &str) -> Self {
+        Self {
+            stream: Mutex::new(None),
+            socket_path: socket_path.to_string(),
+            next_id: AtomicU64::new(1),
+            call_timeout: Self::read_call_timeout(),
+        }
+    }
+
+    fn read_call_timeout() -> Duration {
+        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
+        Duration::from_millis(call_timeout_ms)
     }
 
     /// Dials a fresh connection to `socket_path`. Used both by `connect()` (startup) and by

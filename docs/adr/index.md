@@ -126,6 +126,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0543](0543-narrow-write-lock-around-embedder-round-trip.md) | Narrow `state.write_lock`'s Critical Section Around the Embedder Round Trip | 2026-09-05 |
 | [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
 | [0559](0559-bundle-lbug-extensions.md) | Bundle lbug vector/fts extensions so startup never downloads from the CDN | 2026-09-05 |
+| [0575](0575-lazy-connect-for-attached-mcp-stdio.md) | Lazy-Dial the Attached `--connect` Socket by Default, With `--connect-eager` Opt-Out | 2026-09-09 |
 
 ## Historical numbering
 

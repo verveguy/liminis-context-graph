@@ -93,7 +93,8 @@ that file is the canonical source for per-tool descriptions; they are not duplic
 |------|-------------|
 | `--mcp-stdio` | Starts the MCP server over stdin/stdout instead of binding the Unix socket. |
 | `--scope=<list>` | Comma-separated list of scopes to advertise in `tools/list` (default `all`). See [Scopes](#scopes) below. |
-| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
+| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. By default the socket is dialled lazily, on the first `tools/call` — see [DB-access modes](#db-access-modes) below. |
+| `--connect-eager` | Attached mode only: dial `--connect`'s socket at startup and exit immediately if it's unreachable, restoring the behavior attached mode had before issue #575. No effect without `--connect`. |
 | `--allow-remote-close` | Attached mode only: advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode (no `--connect`). |
 
 ### DB-access modes
@@ -105,6 +106,19 @@ that file is the canonical source for per-tool descriptions; they are not duplic
   forwards each call over the given socket to a service that already has it open. Use this to
   add MCP access to a workspace where another socket-service instance is already running,
   without contending for lbug's single-writer lock.
+  - **Lazy connect by default (issue #575).** The socket is not dialled during startup —
+    `initialize` and `tools/list` succeed immediately, serving the tool set from the compiled-in
+    registry, regardless of whether the daemon at `--connect`'s path is up. The first
+    `tools/call` triggers a dial; if it fails, that call returns a tool result with `isError:
+    true` naming the socket path and suggesting you start the daemon, but the MCP process itself
+    stays up and the client's session is unaffected — no protocol error, no exit. This avoids
+    two failure modes a client can otherwise get stuck in for the client's own cached-failure
+    window: registering a native MCP server before its daemon has started (first install,
+    post-reboot), and the client caching a failed attach for several minutes even after the
+    daemon comes up. Pass `--connect-eager` to restore the pre-#575 behavior of dialling at
+    startup and exiting immediately (before `initialize`) if the socket is unreachable — useful
+    if you rely on that fail-fast behavior as an external health check (e.g. a supervisor that
+    restarts the front until the daemon is ready).
   - **Idle timeout.** `LCG_ATTACHED_CALL_TIMEOUT_MS` (default 30s) is a **per-read-line** idle
     timeout, not a whole-call timeout: it resets on every line read off the socket, including
     `{"type":"progress"}` lines. A call that keeps emitting progress is never bounded by it, no
