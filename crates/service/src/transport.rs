@@ -41,10 +41,15 @@ pub fn pipe_name_for(socket_path: &str) -> String {
 }
 
 /// Where the service records its endpoint for other-language clients: the socket path with its
-/// extension replaced by `endpoint`.
+/// extension replaced by `endpoint`. `None` when the configured path is already a pipe name —
+/// there is nothing to discover, and `\\.\pipe\…` is a device namespace, not a directory a file
+/// could be written beside.
 #[cfg_attr(unix, allow(dead_code))]
-pub fn endpoint_file_for(socket_path: &str) -> PathBuf {
-    Path::new(socket_path).with_extension("endpoint")
+pub fn endpoint_file_for(socket_path: &str) -> Option<PathBuf> {
+    if socket_path.starts_with(PIPE_PREFIX) {
+        return None;
+    }
+    Some(Path::new(socket_path).with_extension("endpoint"))
 }
 
 #[cfg_attr(unix, allow(dead_code))]
@@ -118,9 +123,10 @@ mod imp {
     pub type ClientStream = NamedPipeClient;
 
     pub struct Listener {
-        /// The instance waiting for the next client. Always present, so a client arriving between
-        /// two accepts finds a pipe to connect to instead of `ERROR_FILE_NOT_FOUND`.
-        pending: NamedPipeServer,
+        /// The instance waiting for the next client, kept present between accepts so a client
+        /// arriving in that window finds a pipe instead of `ERROR_FILE_NOT_FOUND`. `None` only
+        /// after creating a replacement failed; the next `accept` recreates it.
+        pending: Option<NamedPipeServer>,
         endpoint: String,
     }
 
@@ -128,21 +134,49 @@ mod imp {
         pub fn bind(socket_path: &str) -> io::Result<Self> {
             let endpoint = super::pipe_name_for(socket_path);
             let pending = create_instance(&endpoint, true)?;
-            std::fs::write(super::endpoint_file_for(socket_path), &endpoint)?;
-            Ok(Self { pending, endpoint })
+            if let Some(endpoint_file) = super::endpoint_file_for(socket_path) {
+                std::fs::write(endpoint_file, &endpoint)?;
+            }
+            Ok(Self {
+                pending: Some(pending),
+                endpoint,
+            })
         }
 
         pub fn endpoint(&self) -> &str {
             &self.endpoint
         }
 
-        /// Waits for a client on the pending instance, then creates the next instance *before*
-        /// handing back the connected one. Cancel-safe: the only await is
-        /// `NamedPipeServer::connect`, and nothing is swapped until it resolves.
+        /// Waits for a client on the pending instance and hands it back, creating the next
+        /// instance first so the pipe never has no listener.
+        ///
+        /// A connected client is never dropped: if creating the replacement fails, the client is
+        /// still returned and `pending` is left empty, and the *next* call recreates it — so the
+        /// error surfaces there, before any client is accepted, rather than stranding one here.
+        /// Cancel-safe: the only await is `NamedPipeServer::connect`, and `pending` is taken only
+        /// after it resolves.
         pub async fn accept(&mut self) -> io::Result<ServerStream> {
-            self.pending.connect().await?;
-            let next = create_instance(&self.endpoint, false)?;
-            Ok(std::mem::replace(&mut self.pending, next))
+            let pending = match self.pending.as_ref() {
+                Some(pending) => pending,
+                None => self.pending.insert(create_instance(&self.endpoint, false)?),
+            };
+            pending.connect().await?;
+            let connected = self
+                .pending
+                .take()
+                .expect("pending instance was just connected");
+            self.pending = match create_instance(&self.endpoint, false) {
+                Ok(next) => Some(next),
+                Err(e) => {
+                    eprintln!(
+                        "liminis-context-graph: could not create the next pipe instance for {} \
+                         ({e}); retrying on the next accept",
+                        self.endpoint
+                    );
+                    None
+                }
+            };
+            Ok(connected)
         }
     }
 
@@ -168,10 +202,10 @@ mod imp {
     /// A pipe name passes through; otherwise prefer the service's discovery file, falling back to
     /// the deterministic name when the service has not written one yet.
     fn client_endpoint(socket_path: &str) -> String {
-        if socket_path.starts_with(super::PIPE_PREFIX) {
+        let Some(endpoint_file) = super::endpoint_file_for(socket_path) else {
             return socket_path.to_string();
-        }
-        match std::fs::read_to_string(super::endpoint_file_for(socket_path)) {
+        };
+        match std::fs::read_to_string(endpoint_file) {
             Ok(recorded) if recorded.trim().starts_with(super::PIPE_PREFIX) => {
                 recorded.trim().to_string()
             }
@@ -305,8 +339,13 @@ mod tests {
     fn endpoint_file_sits_beside_the_socket_path() {
         assert_eq!(
             endpoint_file_for(".lcg/service.sock"),
-            PathBuf::from(".lcg/service.endpoint")
+            Some(PathBuf::from(".lcg/service.endpoint"))
         );
+    }
+
+    #[test]
+    fn a_pipe_name_has_no_endpoint_file() {
+        assert_eq!(endpoint_file_for(r"\\.\pipe\custom"), None);
     }
 
     #[tokio::test]
@@ -348,5 +387,28 @@ mod tests {
 
         let _first = Listener::bind(socket_path).unwrap();
         assert!(Listener::bind(socket_path).is_err());
+    }
+
+    /// `LCG_SOCKET_PATH` may itself be a pipe name (documented); binding must not try to write a
+    /// discovery file into the pipe namespace, and a client given the same name must reach it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn binds_and_serves_a_literal_pipe_name() {
+        let name = format!(r"\\.\pipe\lcg-test-literal-{}", std::process::id());
+
+        let mut listener = Listener::bind(&name).expect("bind a literal pipe name");
+        assert_eq!(listener.endpoint(), name);
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (_reader, mut writer) = tokio::io::split(stream);
+            writer.write_all(b"hello\n").await.unwrap();
+            writer.flush().await.unwrap();
+        });
+
+        let client = connect(&name).await.expect("connect by pipe name");
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        assert_eq!(line, "hello\n");
+        server.await.unwrap();
     }
 }
