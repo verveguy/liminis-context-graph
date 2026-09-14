@@ -1,0 +1,106 @@
+name: Windows
+
+# Windows build + transport coverage (issue #581). Kept out of ci.yml on purpose: that workflow's
+# job graph (build-release artifacts, lbug cache ownership, the docs-only classifier feeding the
+# required `test (ubuntu-latest)` check) is Linux-shaped, and this job shares none of it. Not a
+# required check unless branch protection is changed to make it one.
+#
+# What it proves on x86_64-pc-windows-msvc:
+# - the workspace lints clean under -D warnings (Windows-only cfg arms included);
+# - lcg-service's unit tests, including the named-pipe transport (owner-only DACL, first-instance
+#   refusal, round trip);
+# - socket_service_e2e: the real binary serving JSON-RPC over the named pipe, discovered via
+#   .lcg/service.endpoint, through health_check -> knowledge_status -> knowledge_close.
+#
+# lcg-core's suite also passes on Windows (verified on a real machine for #581) but is not run
+# here yet: it roughly doubles the job time, and it has no Windows-specific code paths.
+
+on:
+  pull_request:
+    paths:
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "LBUG_EXTENSION_VERSION"
+      - "scripts/stage-openssl-windows.sh"
+      - "scripts/stage-lbug-extensions.sh"
+      - ".github/workflows/windows.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  OPENSSL_TRIPLET: x64-windows
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # vcpkg ships on the runner image; building openssl:x64-windows from source takes several
+      # minutes, so cache the installed tree keyed on the vcpkg checkout it was built with.
+      - name: Get vcpkg commit for cache key
+        id: vcpkg
+        run: echo "commit=$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore OpenSSL (vcpkg) from cache
+        id: openssl-cache
+        uses: actions/cache@v6
+        with:
+          key: vcpkg-openssl-${{ env.OPENSSL_TRIPLET }}-${{ steps.vcpkg.outputs.commit }}
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed/${{ env.OPENSSL_TRIPLET }}
+
+      - name: Build OpenSSL (vcpkg)
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg" install "openssl:$OPENSSL_TRIPLET"'
+
+      # lbug's build.rs asks MSVC for ssl.lib/crypto.lib; stage renamed import libs onto LIB and
+      # put the OpenSSL DLLs on PATH for the test binaries. See the script's header.
+      - name: Stage OpenSSL for the MSVC linker
+        run: |
+          echo "OPENSSL_DIR=$VCPKG_INSTALLATION_ROOT\\installed\\$OPENSSL_TRIPLET" >> "$GITHUB_ENV"
+          bash scripts/stage-openssl-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/$OPENSSL_TRIPLET"
+
+      - name: Restore lbug extension bundle from cache
+        id: lbug-ext-cache
+        uses: actions/cache@v6
+        with:
+          key: lbug-extension-bundle-win_amd64-${{ hashFiles('LBUG_EXTENSION_VERSION') }}
+          path: lbug-extension-bundle
+
+      - name: Stage lbug vector/fts extensions (win_amd64)
+        if: steps.lbug-ext-cache.outputs.cache-hit != 'true'
+        run: bash scripts/stage-lbug-extensions.sh win_amd64 lbug-extension-bundle
+
+      - name: Point Db::open at the staged extensions
+        run: echo "LCG_LBUG_HOME=$(cygpath -w "$PWD/lbug-extension-bundle")" >> "$GITHUB_ENV"
+
+      - name: Clippy (lcg-core, lcg-service; all targets)
+        run: cargo clippy -p lcg-core -p lcg-service --all-targets -- -D warnings
+
+      - name: lcg-service unit tests (incl. named-pipe transport)
+        run: cargo test -p lcg-service --bin liminis-context-graph
+
+      - name: Socket service end-to-end over the named pipe
+        run: cargo test -p lcg-service --test socket_service_e2e
