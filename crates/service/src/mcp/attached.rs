@@ -31,11 +31,15 @@ use std::time::Duration;
 
 use lcg_core::IpcResponse;
 use serde_json::{json, Value};
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
     sync::{mpsc::UnboundedSender, Mutex},
 };
+// PROBE ONLY (#581): see the matching alias in main.rs.
+#[cfg(not(unix))]
+use tokio::net::TcpStream as UnixStream;
 
 use crate::mcp::backend::McpBackend;
 

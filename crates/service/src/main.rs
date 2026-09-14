@@ -34,14 +34,19 @@ use lcg_core::{
 use rmcp::ServiceExt;
 use serde_json::Value;
 #[cfg(unix)]
+use tokio::net::{unix::OwnedWriteHalf, UnixListener, UnixStream};
+#[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
     sync::Notify,
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+// PROBE ONLY (#581): alias TCP types on non-unix so type-checking proceeds past the
+// transport and surfaces the errors hidden behind it. Not the port design.
+#[cfg(not(unix))]
+use tokio::net::{tcp::OwnedWriteHalf, TcpListener as UnixListener, TcpStream as UnixStream};
 
 async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
     let (reader, mut writer) = stream.into_split();
@@ -1398,7 +1403,14 @@ async fn async_main(
                 std::fs::create_dir_all(parent)?;
             }
             let _ = std::fs::remove_file(&socket_path);
+            #[cfg(unix)]
             let listener = UnixListener::bind(&socket_path)?;
+            #[cfg(not(unix))]
+            let listener = UnixListener::from_std({
+                let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+                l.set_nonblocking(true)?;
+                l
+            })?;
             eprintln!("liminis-context-graph: listening on {socket_path}");
 
             // FR-001/SC-002: socket-service (hand-started) mode keeps today's fail-fast
