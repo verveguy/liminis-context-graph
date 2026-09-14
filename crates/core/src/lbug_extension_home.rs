@@ -155,9 +155,10 @@ fn resolve_from(
 ///
 /// 1. `LCG_LBUG_HOME` env var override (Story 2) — the operator's escape hatch for a
 ///    non-standard layout.
-/// 2. A directory derived from `std::env::current_exe()`'s parent — the layout a release
-///    archive bundles files under (Story 1, FR-004): the binary sits at the archive's top
-///    level, with a `.lbdb/` sibling directory.
+/// 2. The directory of the *real* running binary — `std::env::current_exe()` canonicalized
+///    through any symlink it was launched via (see [`exe_dir`]) — the layout a release archive
+///    bundles files under (Story 1, FR-004): the binary sits at the archive's top level, with a
+///    `.lbdb/` sibling directory.
 /// 3. Neither resolves: `Ok(None)`. `Db::open` falls back to lbug's own default (`INSTALL`,
 ///    user home directory, download on demand) — Story 3, the required non-regression path.
 pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error> {
