@@ -1,0 +1,99 @@
+name: Windows probe
+
+# Spike for #581: discover what actually breaks when the workspace is compiled for
+# x86_64-pc-windows-msvc. Diagnostic only — not a required check, never runs on PRs or
+# main. Every compile step is continue-on-error so one failure doesn't hide the next;
+# the job summary and uploaded logs are the deliverable.
+
+on:
+  push:
+    branches: ['spike/windows-**']
+  workflow_dispatch:
+
+concurrency:
+  group: windows-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Environment report
+        run: |
+          rustc -Vv; cargo -V
+          cmake --version || true
+          perl -v | head -2 || true
+          pkg-config --version || echo "no pkg-config"
+          echo "VCPKG_INSTALLATION_ROOT=${VCPKG_INSTALLATION_ROOT:-unset}"
+          ls "/c/Program Files/OpenSSL"* 2>/dev/null || echo "no C:/Program Files/OpenSSL*"
+
+      # openssl-sys (via reqwest/native-tls) needs an OpenSSL on MSVC. vcpkg ships on the
+      # runner image; this is the probe's choice, not a decision for the port.
+      - name: Install OpenSSL via vcpkg
+        id: openssl
+        continue-on-error: true
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install openssl:x64-windows
+          echo "OPENSSL_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+
+      - name: cargo check (libs + bins)
+        id: check
+        continue-on-error: true
+        run: cargo check --workspace --keep-going --message-format=short 2>&1 | tee check.log
+
+      - name: cargo check (all targets, incl. tests)
+        id: check_all
+        continue-on-error: true
+        run: cargo check --workspace --all-targets --keep-going --message-format=short 2>&1 | tee check-all-targets.log
+
+      # check never links; lbug's build.rs emits dylib=ssl/crypto unconditionally, so a link
+      # is the only way to see whether the native side resolves on MSVC.
+      - name: cargo build (service binary, debug)
+        id: build
+        continue-on-error: true
+        run: cargo build -p lcg-service --bin liminis-context-graph --message-format=short 2>&1 | tee build.log
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Windows probe (#581)"
+            echo "| step | outcome |"
+            echo "|---|---|"
+            echo "| openssl (vcpkg) | ${{ steps.openssl.outcome }} |"
+            echo "| check libs+bins | ${{ steps.check.outcome }} |"
+            echo "| check all targets | ${{ steps.check_all.outcome }} |"
+            echo "| build service binary | ${{ steps.build.outcome }} |"
+            for f in check.log check-all-targets.log build.log; do
+              [ -f "$f" ] || continue
+              # --message-format=short puts errors on one line: `path:line:col: error[E..]: msg`
+              # (or a bare `error: msg` for build-script/link failures).
+              echo; echo "### $f — $(grep -cE '(^|: )error(\[E[0-9]+\])?:' "$f" || true) error lines"
+              echo '```'
+              grep -E '(^|: )error(\[E[0-9]+\])?:' "$f" | sed -E 's/^([^:]+:[0-9]+):[0-9]+:/\1:/' | sort | uniq -c | sort -rn | head -60
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-probe-logs
+          path: '*.log'
+          retention-days: 14
+          if-no-files-found: warn
