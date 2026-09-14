@@ -179,11 +179,37 @@ pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error>
             )));
         }
     };
-    let exe_root = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    resolve_from(env_root.as_deref(), exe_dir().as_deref(), platform)
+}
 
-    resolve_from(env_root.as_deref(), exe_root.as_deref(), platform)
+/// The directory of the *real* running binary. `current_exe()` alone is not enough: on macOS
+/// and Windows it reports the path the process was launched as, so a binary started through a
+/// symlink (e.g. orac's stable `~/.zen/bin/lcg-service`) resolved tier 2 against the link's
+/// directory, never found the `.lbdb` bundle beside the real binary, and lbug silently fell back
+/// to downloading from the CDN — voiding #559's offline guarantee with no error. Canonicalizing
+/// follows the link; if that fails, the launched path is still the best remaining guess.
+fn exe_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let real = std::fs::canonicalize(&exe)
+        .map(strip_verbatim_prefix)
+        .unwrap_or(exe);
+    real.parent().map(Path::to_path_buf)
+}
+
+/// `std::fs::canonicalize` on Windows returns a verbatim `\\?\C:\…` path. The extension paths
+/// built from it are handed to lbug's `LOAD EXTENSION` as strings, so return the ordinary
+/// drive-letter form when there is one (verbatim UNC paths are left as they are).
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(test)]
