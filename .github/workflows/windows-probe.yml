@@ -17,6 +17,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # ANSI colour codes break the Summarise step's error grep (probe #1).
+  CARGO_TERM_COLOR: never
+
 defaults:
   run:
     shell: bash
