@@ -102,6 +102,9 @@ fn socket_service_answers_over_the_platform_transport_and_closes_cleanly() {
         .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
     let mut child = ChildGuard::spawn(cmd);
 
+    let mut conn = wait_until_healthy(&socket_path, Duration::from_secs(60));
+
+    // Checked only once healthy: the file is written at bind, which the spawn above races.
     #[cfg(windows)]
     {
         let recorded = std::fs::read_to_string(socket_path.with_extension("endpoint"))
@@ -111,8 +114,6 @@ fn socket_service_answers_over_the_platform_transport_and_closes_cleanly() {
             "unexpected endpoint {recorded:?}"
         );
     }
-
-    let mut conn = wait_until_healthy(&socket_path, Duration::from_secs(60));
 
     let status = conn.call(2, "knowledge_status", json!({}));
     assert_eq!(
