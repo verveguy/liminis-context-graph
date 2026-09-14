@@ -26,7 +26,7 @@ title: Configuration
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
+| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`). On Windows it names the workspace endpoint instead: the service serves a named pipe derived from this path and writes its name to `.lcg/service.endpoint` — see [IPC & MCP Reference: Windows](ipc-mcp-reference.md#windows-named-pipe). A `\\.\pipe\…` value is used as the pipe name directly. |
 | `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
 | `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
