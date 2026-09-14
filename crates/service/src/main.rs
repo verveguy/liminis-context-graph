@@ -4,6 +4,7 @@ mod migration;
 #[cfg(unix)]
 mod sigterm_diag;
 mod sink;
+mod transport;
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -36,15 +37,19 @@ use serde_json::Value;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::Notify,
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
-async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
-    let (reader, mut writer) = stream.into_split();
+/// Serves one client connection. Generic over the stream so the same loop runs over a Unix socket
+/// or a Windows named pipe (`transport`, #581).
+async fn handle_connection<S>(stream: S, state: Arc<AppState>, shutdown_notify: Arc<Notify>)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -87,7 +92,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_no
     }
 }
 
-async fn write_parse_error(writer: &mut OwnedWriteHalf, e: serde_json::Error) {
+async fn write_parse_error<W: AsyncWrite + Unpin>(writer: &mut W, e: serde_json::Error) {
     let response = serde_json::json!({
         "jsonrpc": "2.0",
         "id": null,
@@ -99,10 +104,10 @@ async fn write_parse_error(writer: &mut OwnedWriteHalf, e: serde_json::Error) {
 
 /// Returns `Some(response)` if the streaming dispatch produced a final response, or `None` if the
 /// client disconnected and the dispatch task was aborted.
-async fn handle_streaming_request(
+async fn handle_streaming_request<W: AsyncWrite + Unpin>(
     req: IpcRequest,
     state: Arc<AppState>,
-    writer: &mut OwnedWriteHalf,
+    writer: &mut W,
 ) -> Option<IpcResponse> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let req_id = req.id.clone();
@@ -190,6 +195,7 @@ async fn resolve_and_probe_embedder(
     embedder_model: &str,
     embedding_dim_override: Option<usize>,
 ) -> ProbeOutcome {
+    #[cfg(unix)]
     const DEFAULT_UDS_PATH: &str = "/tmp/liminis-inference.sock";
 
     let resolved = if let Some(uds_path) = cli_uds {
@@ -206,6 +212,7 @@ async fn resolve_and_probe_embedder(
         }
         #[cfg(not(unix))]
         {
+            let _ = uds_path;
             return ProbeOutcome::Fatal(
                 "--embedder-uds is only supported on Unix platforms".to_string(),
             );
@@ -282,10 +289,10 @@ async fn resolve_and_probe_embedder(
     // Redaction substring for the raw configured URL (FR-007) — transport_info() already
     // redacts `endpoint` above, but a wrapped reqwest::Error's Display can independently
     // echo the raw URL, so error-message sites below scrub the same substring separately.
-    let url_scrub = if let ResolvedTransport::Http(url) = &resolved {
-        redact_url_userinfo(url).1
-    } else {
-        None
+    let url_scrub = match &resolved {
+        ResolvedTransport::Http(url) => redact_url_userinfo(url).1,
+        #[cfg(unix)]
+        ResolvedTransport::Uds(_) => None,
     };
     let scrub_url = |msg: String| -> String {
         match &url_scrub {
@@ -601,6 +608,7 @@ async fn bootstrap_app_state(
             }
             #[cfg(not(unix))]
             {
+                let _ = &uds_path;
                 return Err("--extractor-uds is only supported on Unix platforms".into());
             }
         } else if let Some(http_url) = extractor_cli_http {
@@ -1004,6 +1012,25 @@ fn install_shutdown_signal_handlers(shutdown_ct: CancellationToken) -> std::io::
             ct.cancel();
         });
     }
+    // Windows has no SIGTERM. A console window closing, a logoff/shutdown, and Ctrl+Break are
+    // its termination requests (Ctrl+C is covered by `ctrl_c()` below on every platform).
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let mut close = ctrl_close()?;
+        let mut shutdown = ctrl_shutdown()?;
+        let mut brk = ctrl_break()?;
+        let ct = shutdown_ct.clone();
+        tokio::spawn(async move {
+            let event = tokio::select! {
+                _ = close.recv() => "CTRL_CLOSE",
+                _ = shutdown.recv() => "CTRL_SHUTDOWN",
+                _ = brk.recv() => "CTRL_BREAK",
+            };
+            eprintln!("liminis-context-graph: received {event}, shutting down");
+            ct.cancel();
+        });
+    }
     {
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
@@ -1023,7 +1050,7 @@ async fn run_socket_service(
     telemetry_sink: Arc<dyn TelemetrySink>,
     sink_drain_handle: tokio::task::JoinHandle<()>,
     state: Arc<AppState>,
-    listener: UnixListener,
+    mut listener: transport::Listener,
     shutdown_timeout_ms: u64,
     shutdown_ct: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1045,7 +1072,7 @@ async fn run_socket_service(
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (stream, _) = result?;
+                let stream = result?;
                 let state_clone = Arc::clone(&state);
                 let notify_clone = Arc::clone(&shutdown_notify);
                 join_set.spawn(handle_connection(stream, state_clone, notify_clone));
@@ -1397,9 +1424,11 @@ async fn async_main(
             if let Some(parent) = std::path::Path::new(&socket_path).parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let _ = std::fs::remove_file(&socket_path);
-            let listener = UnixListener::bind(&socket_path)?;
-            eprintln!("liminis-context-graph: listening on {socket_path}");
+            let listener = transport::Listener::bind(&socket_path)?;
+            eprintln!(
+                "liminis-context-graph: listening on {}",
+                listener.endpoint()
+            );
 
             // FR-001/SC-002: socket-service (hand-started) mode keeps today's fail-fast
             // behavior unchanged — an unreachable embedder is never retried or degraded here.

@@ -33,11 +33,11 @@ use lcg_core::IpcResponse;
 use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
     sync::{mpsc::UnboundedSender, Mutex},
 };
 
 use crate::mcp::backend::McpBackend;
+use crate::transport::{self, ClientStream};
 
 /// Default idle-read timeout for a single line off the attached socket (Copilot review finding
 /// on PR #196): if the remote service hangs mid-call (e.g. crashes partway through a streaming
@@ -49,7 +49,7 @@ const DEFAULT_ATTACHED_CALL_TIMEOUT_MS: u64 = 30_000;
 
 pub struct AttachedBackend {
     /// `None` means the connection is known-dead; the next call redials lazily before use.
-    stream: Mutex<Option<BufReader<UnixStream>>>,
+    stream: Mutex<Option<BufReader<ClientStream>>>,
     socket_path: String,
     next_id: AtomicU64,
     call_timeout: Duration,
@@ -57,7 +57,8 @@ pub struct AttachedBackend {
 
 impl AttachedBackend {
     /// Connects once at startup. Fails fast (not hang) if the socket is missing or has no
-    /// listener — `UnixStream::connect` returns immediately in both cases (ENOENT/ECONNREFUSED).
+    /// listener — `transport::connect` returns immediately in both cases (ENOENT/ECONNREFUSED on
+    /// Unix; a missing named pipe on Windows).
     ///
     /// Used by `--connect-eager` (issue #575): today's original behavior, kept byte-for-byte
     /// unchanged so SC-004's parity guarantee holds. Prefer `new_lazy` for the default path.
@@ -96,8 +97,8 @@ impl AttachedBackend {
 
     /// Dials a fresh connection to `socket_path`. Used both by `connect()` (startup) and by
     /// `call()`'s reconnect paths (FR-008/FR-010).
-    async fn dial(socket_path: &str) -> Result<BufReader<UnixStream>, String> {
-        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+    async fn dial(socket_path: &str) -> Result<BufReader<ClientStream>, String> {
+        let stream = transport::connect(socket_path).await.map_err(|e| {
             format!(
                 "failed to connect to attached service at '{socket_path}': {e}. \
                  Ensure a liminis-context-graph socket service is running at this path."
@@ -111,7 +112,7 @@ impl AttachedBackend {
     /// failure, since a flush that fails after a successful write_all leaves genuine ambiguity
     /// about how many bytes reached the kernel, and both are treated as "safe to retry" per
     /// A1's conservative write-time boundary.
-    async fn write_request(stream: &mut BufReader<UnixStream>, line: &str) -> Result<(), String> {
+    async fn write_request(stream: &mut BufReader<ClientStream>, line: &str) -> Result<(), String> {
         stream
             .write_all(format!("{line}\n").as_bytes())
             .await

@@ -379,8 +379,12 @@ impl OaiEmbedder {
     /// HTTP request. A no-op on the UDS transport (FR-005) — UDS is a local socket and never
     /// accepts a key regardless of this call, since `new_uds` structurally has no key parameter.
     pub fn with_api_key(mut self, key: Option<String>) -> Self {
-        if let EmbedTransport::Http { api_key, .. } = &mut self.transport {
-            *api_key = key;
+        // A `match` rather than `if let`: with the UDS variant compiled out (non-Unix) the
+        // pattern would be irrefutable and trip `-D warnings`.
+        match &mut self.transport {
+            EmbedTransport::Http { api_key, .. } => *api_key = key,
+            #[cfg(unix)]
+            EmbedTransport::Uds { .. } => {}
         }
         self
     }
