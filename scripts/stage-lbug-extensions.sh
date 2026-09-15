@@ -31,6 +31,17 @@
 # Reads the version from the repo-root LBUG_EXTENSION_VERSION file — the same file
 # crates/core/src/lbug_extension_home.rs reads via include_str!() — so the version segment can
 # never drift between what this script stages and what Db::open looks for.
+#
+# THIS SCRIPT IS THE ONLY LEGITIMATE WRITER of the <dest>/.lbdb/extension/<version>/<platform>/
+# tree (issue #561). Db::open's resolution (lbug_extension_home.rs) is directory-existence-based
+# and cannot verify that staged bytes actually correspond to the version their directory is named
+# after — it only checks the directory exists and its files are non-empty. This script's own
+# `$version` variable feeds both the download URL and the destination directory name below, so a
+# mismatch between a directory's name and its contents is impossible as long as this script is
+# the only thing that populates the tree. Never hand-copy or hand-rename files into this
+# directory structure — doing so can produce a directory that looks validly staged (and loads
+# without error) while actually shipping the wrong extension version, silently defeating #559's
+# CDN-avoidance guarantee with nothing to catch it.
 
 set -euo pipefail
 

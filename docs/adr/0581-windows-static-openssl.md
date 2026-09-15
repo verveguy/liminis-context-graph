@@ -43,11 +43,13 @@ It was verified on a real Windows 11 machine that static linking works:
 is unchanged for macOS and Linux.
 
 - **Staging:** `scripts/stage-openssl-windows.sh` is the single mechanism, used by `release.yml`,
-  `windows.yml` and local builds. It stages `libssl.lib`/`libcrypto.lib` as the `ssl.lib`/`crypto.lib`
-  names lbug asks for, onto `LIB` (never `RUSTFLAGS`, which would bust cargo's cache and collide with
-  cargo-dist). It detects a static install by the absence of OpenSSL DLLs in `<root>/bin`, and then
-  exports `LINK` with the Windows system libraries plus `OPENSSL_STATIC=1`. A dynamic install still
-  works for local development: the script adds `<root>/bin` to `PATH` instead.
+  `windows.yml` and local builds. It stages `libssl.lib`/`libcrypto.lib` under both the `ssl.lib`/
+  `crypto.lib` names lbug 0.18.1 asked for and their own `libssl.lib`/`libcrypto.lib` names —
+  which lbug 0.20.x's (0.20.3 included) Windows-specific link-lib branch asks for directly, per issue #561 — onto
+  `LIB` (never `RUSTFLAGS`, which would bust cargo's cache and collide with cargo-dist). It detects
+  a static install by the absence of OpenSSL DLLs in `<root>/bin`, and then exports `LINK` with the
+  Windows system libraries plus `OPENSSL_STATIC=1`. A dynamic install still works for local
+  development: the script adds `<root>/bin` to `PATH` instead.
 - **Release build:** `release.yml` builds the static triplet on the Windows runner (cached by vcpkg
   commit) before `dist build`.
 - **Guard:** `scripts/assert-openssl-linkage.sh` gains a Windows branch that **fails** if a shipped
