@@ -54,6 +54,58 @@ is unchanged for macOS and Linux.
   binary imports `libssl-3*.dll` or `libcrypto-3*.dll`. Previously it printed "unsupported OS" and
   exited 0, which would have passed a broken artifact.
 
+### Amendment (2026-09-15): the lbug extensions still need OpenSSL DLLs
+
+Static linking covers **only lcg's own executables**. lbug's prebuilt `win_amd64` extension
+libraries, `libvector` and `libfts.lbug_extension` (verified for 0.18.1 and 0.20.0), are DLLs that
+import `libssl-3-x64.dll` and `libcrypto-3-x64.dll`, plus `msvcp140`/`vcruntime140`/`vcruntime140_1`.
+lbug loads each one with a plain `LoadLibraryW(<absolute path>)`, so Windows resolves those imports
+from the exe's directory, the system directories and `PATH`, never from the extension's own
+directory. On a machine without OpenSSL DLLs on `PATH`, `Db::open` fails with `Failed to load
+library: …libvector.lbug_extension … The specified module could not be found.`
+
+This is a property of lbug's Windows extensions, not of lcg's bundling (ADR-0559). An extension
+lbug downloads from its CDN has the same dependency and fails the same way. It went unnoticed
+because every Windows run happened under Git Bash, whose `PATH` includes Git for Windows'
+`mingw64\bin`, which ships both DLLs. The same exe and bundle fail from PowerShell without that
+directory and pass with it.
+
+- **Ship the two DLLs in the bundle.** `scripts/stage-openssl-dlls-windows.sh` copies them from
+  vcpkg's **dynamic** `x64-windows` OpenSSL port (OpenSSL 3.6.4 at the time of writing, from the
+  same vcpkg commit as the static triplet) into `.lbdb/extension/<LBUG_EXTENSION_VERSION>/win_amd64/`.
+  `include = [".lbdb"]` already packages that directory per target, so no per-target `include` is
+  needed.
+- **Put that directory on the DLL search path.**
+  `lbug_extension_home::expose_extension_dependencies` calls `SetDllDirectoryW(<that directory>)`
+  before `LOAD EXTENSION`. With a plain `LoadLibraryW`, that directory is searched right after the
+  exe's directory. The `AddDllDirectory` family has no effect without `LOAD_LIBRARY_SEARCH_*` flags,
+  which lbug doesn't pass. The call is process-global, and race-free only under `Db::open`'s
+  `OPEN_LOCK`. It works the same for the release archive and an `LCG_LBUG_HOME` bundle.
+- **CI runs clean.** `windows.yml` runs its end-to-end test from PowerShell with Git's `mingw64`/`usr`
+  directories and any OpenSSL or vcpkg directories removed from `PATH`, and first asserts that neither
+  DLL is resolvable there.
+
+Consequences of the amendment:
+
+- **An OpenSSL CVE now means a Windows lcg release for two reasons, not one:** the statically linked
+  exe, and the `libssl-3-x64.dll`/`libcrypto-3-x64.dll` lcg now redistributes. Both come from the
+  same vcpkg OpenSSL port, so one vcpkg bump updates both.
+- The Windows archive is no longer "a single self-contained `.exe`". It is the exe plus the `.lbdb`
+  bundle, which now carries two OpenSSL DLLs.
+- **The Visual C++ runtime stays a user prerequisite, and the extensions add no new failure mode for
+  it.** The exe itself imports `msvcp140.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`, the same
+  three the extensions import. The loader resolves those before any lcg code runs, so a machine
+  without the redistributable fails at launch with the standard loader error, not inside `Db::open`.
+  Any machine where lcg starts can also satisfy the extensions' runtime imports. Bundling the runtime
+  app-local would need the DLLs beside the exe at the archive root, which `SetDllDirectoryW` cannot
+  help with (the exe's imports resolve first) and which the flat `include` cannot place for one
+  target. So the release notes state the requirement instead.
+- **What testing shows, and what it doesn't.** Verification ran on a machine with Visual Studio Build
+  Tools, so the VC++ runtime was present. It shows the bundled OpenSSL DLLs resolve with no OpenSSL
+  DLL on `PATH`. It does not show behaviour on a pristine Windows install without the redistributable.
+- Any later DLL load inside lcg inherits the changed search order: the bundle directory is added,
+  and the current directory is removed. This is intended for a service process.
+
 ## Consequences
 
 - The Windows archive is a single self-contained `.exe` plus the bundled lbug extensions (ADR-0559),

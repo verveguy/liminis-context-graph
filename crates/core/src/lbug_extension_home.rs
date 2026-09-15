@@ -84,6 +84,55 @@ pub(crate) struct ExtensionFiles {
     pub(crate) fts: PathBuf,
 }
 
+impl ExtensionFiles {
+    /// The `<root>/.lbdb/extension/<version>/<platform>/` directory both files live under
+    /// (each sits in its own `vector/` or `fts/` subdirectory of it).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn platform_dir(&self) -> Option<&Path> {
+        self.vector.parent().and_then(Path::parent)
+    }
+}
+
+/// Makes the extension libraries' own DLL dependencies resolvable from the bundle (Windows, #581).
+///
+/// lbug's `win_amd64` `libvector`/`libfts` extensions import `libssl-3-x64.dll` and
+/// `libcrypto-3-x64.dll`, and lbug loads them with a plain `LoadLibraryW(<absolute path>)`
+/// (`lbug-src/src/extension/extension.cpp`). That resolves an extension's dependencies through the
+/// standard search order — the exe's directory, the system directories, `PATH` — never the
+/// extension's own directory. So the release bundle ships those two DLLs in the platform directory,
+/// and this adds that directory to the process DLL search path with `SetDllDirectoryW` (searched
+/// right after the exe's directory) before `LOAD EXTENSION`.
+///
+/// Without it the extensions load only where OpenSSL DLLs happen to be on `PATH`. Git for Windows'
+/// `mingw64\bin` is one such place, which is how the gap went unnoticed through every Git Bash test
+/// run. The main binary links OpenSSL statically (ADR-0581); the extensions, being lbug's prebuilt
+/// DLLs, cannot. On other platforms the extensions resolve OpenSSL through the dynamic loader
+/// exactly as the main binary does (ADR-0550), so this is a no-op there.
+#[cfg(windows)]
+pub(crate) fn expose_extension_dependencies(files: &ExtensionFiles) -> Result<(), Error> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let Some(dir) = files.platform_dir() else {
+        return Ok(());
+    };
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call.
+    let ok = unsafe { windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW(wide.as_ptr()) };
+    if ok == 0 {
+        return Err(Error::Config(format!(
+            "SetDllDirectoryW({}) failed: {}",
+            dir.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn expose_extension_dependencies(_files: &ExtensionFiles) -> Result<(), Error> {
+    Ok(())
+}
+
 /// Checks whether `root/.lbdb/extension/<LBUG_EXTENSION_VERSION>/<platform>/` is a usable
 /// candidate, returning the resolved file paths when it is.
 ///
@@ -263,6 +312,22 @@ mod tests {
         assert_eq!(
             strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\lcg")),
             PathBuf::from(r"\\?\UNC\server\share\lcg")
+        );
+    }
+
+    /// The directory `expose_extension_dependencies` puts on the Windows DLL search path must be
+    /// the `<version>/<platform>` directory the bundle's OpenSSL DLLs are staged into — the
+    /// parent of the per-extension subdirectories, not one of them.
+    #[test]
+    fn platform_dir_is_the_versioned_platform_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_stub_bundle(dir.path(), extension_version(), "win_amd64");
+        let files = resolve_from(Some(dir.path()), None, "win_amd64")
+            .unwrap()
+            .expect("stub bundle resolves");
+        assert_eq!(
+            files.platform_dir(),
+            Some(versioned_dir(dir.path(), extension_version(), "win_amd64").as_path())
         );
     }
 

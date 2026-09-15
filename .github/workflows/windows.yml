@@ -45,6 +45,8 @@ env:
   CARGO_TERM_COLOR: never
   # Static, as release builds link it (ADR-0581): what CI tests is what ships.
   OPENSSL_TRIPLET: x64-windows-static-md
+  # Dynamic triplet, only for the two DLLs lbug's win_amd64 extensions import (ADR-0581).
+  OPENSSL_DLL_TRIPLET: x64-windows
 
 jobs:
   windows:
@@ -94,6 +96,22 @@ jobs:
         if: steps.lbug-ext-cache.outputs.cache-hit != 'true'
         run: bash scripts/stage-lbug-extensions.sh win_amd64 lbug-extension-bundle
 
+      - name: Restore dynamic OpenSSL (vcpkg) from cache
+        id: openssl-dll-cache
+        uses: actions/cache@v6
+        with:
+          key: vcpkg-openssl-${{ env.OPENSSL_DLL_TRIPLET }}-${{ steps.vcpkg.outputs.commit }}
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed/${{ env.OPENSSL_DLL_TRIPLET }}
+
+      - name: Build dynamic OpenSSL (vcpkg) for the extension DLLs
+        if: steps.openssl-dll-cache.outputs.cache-hit != 'true'
+        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg" install "openssl:$OPENSSL_DLL_TRIPLET"'
+
+      # lbug's extension DLLs import libssl-3-x64.dll/libcrypto-3-x64.dll; ship them in the bundle,
+      # exactly as release.yml does, so CI exercises the same resolution lcg relies on.
+      - name: Bundle OpenSSL DLLs beside the lbug extensions
+        run: bash scripts/stage-openssl-dlls-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/$OPENSSL_DLL_TRIPLET" lbug-extension-bundle
+
       - name: Point Db::open at the staged extensions
         run: echo "LCG_LBUG_HOME=$(cygpath -w "$PWD/lbug-extension-bundle")" >> "$GITHUB_ENV"
 
@@ -103,8 +121,20 @@ jobs:
       - name: lcg-service unit tests (incl. named-pipe transport)
         run: cargo test -p lcg-service --bin liminis-context-graph
 
-      - name: Socket service end-to-end over the named pipe
-        run: cargo test -p lcg-service --test socket_service_e2e
+      # Run the e2e from PowerShell with every PATH entry that could supply an OpenSSL DLL removed
+      # (Git for Windows' mingw64\bin and usr\bin ship libssl-3-x64.dll; the image may carry other
+      # OpenSSL installs). Under Git Bash those DLLs are on PATH, which silently satisfied the
+      # extensions' imports and hid the missing bundle DLLs (#581). The first step proves the
+      # filtered PATH cannot resolve them, so a pass means the bundle did.
+      - name: Socket service end-to-end over the named pipe (no OpenSSL DLL on PATH)
+        shell: pwsh
+        run: |
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -and $_ -notmatch '\\Git\\(mingw64|usr)\\|OpenSSL|vcpkg' }) -join ';'
+          foreach ($dll in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
+            $found = (Get-Command $dll -ErrorAction SilentlyContinue).Source
+            if ($found) { throw "$dll is still resolvable on PATH at $found — the e2e would not prove the bundle" }
+          }
+          cargo test -p lcg-service --test socket_service_e2e
 
       - name: Assert the service binary imports no OpenSSL DLL
         run: bash scripts/assert-openssl-linkage.sh target/debug/liminis-context-graph.exe
