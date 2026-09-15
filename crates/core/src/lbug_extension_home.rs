@@ -69,7 +69,7 @@ fn extension_version() -> &'static str {
 /// `lbug` workspace pin, and this must be hand-updated to match it (independently of whatever
 /// `LBUG_EXTENSION_VERSION` ends up being set to), or the test fails.
 #[allow(dead_code)] // only read by the `#[cfg(test)]` tripwire below
-const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.20.4";
+const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.20.3";
 
 const EXTENSION_NAMES: [&str; 2] = ["vector", "fts"];
 
