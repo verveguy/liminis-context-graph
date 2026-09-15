@@ -35,6 +35,26 @@ pub fn rrf_fuse(lists: &[&[(String, f64)]]) -> Vec<String> {
     ranked.into_iter().map(|(uuid, _)| uuid).collect()
 }
 
+/// Reorders `rows` to follow `ranked_uuids`, the fused ranking they were fetched for.
+///
+/// The row lookups (`get_entities_by_uuids`, `get_relates_to_by_uuids`) are a Cypher
+/// `WHERE uuid IN $uuids` with no `ORDER BY`, so they return rows in storage order. Without this
+/// step every hybrid search returned the right top-k *set* in insertion order, silently
+/// discarding the RRF ranking. Rows whose uuid is absent from the ranking (not expected) sort last.
+fn order_by_rank<T>(
+    mut rows: Vec<T>,
+    ranked_uuids: &[String],
+    uuid_of: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let rank: HashMap<&str, usize> = ranked_uuids
+        .iter()
+        .enumerate()
+        .map(|(i, uuid)| (uuid.as_str(), i))
+        .collect();
+    rows.sort_by_key(|row| rank.get(uuid_of(row)).copied().unwrap_or(usize::MAX));
+    rows
+}
+
 /// Pure vector-cosine passage search on Episodic nodes (HOT path — no lock held).
 ///
 /// lbug HNSW returns distance (lower = closer); converts to similarity: `score = 1.0 - distance`.
@@ -107,7 +127,8 @@ pub async fn hybrid_entity_search(
 
         let fused_uuids = rrf_fuse(&[&bm25, &vector, &vector_summary]);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
-        conn.get_entities_by_uuids(&top_uuids)
+        let rows = conn.get_entities_by_uuids(&top_uuids)?;
+        Ok(order_by_rank(rows, &top_uuids, |e| &e.uuid))
     })
     .await??;
 
@@ -139,7 +160,8 @@ pub async fn hybrid_edge_search(
 
         let fused_uuids = rrf_fuse(&[&bm25, &vector]);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
-        conn.get_relates_to_by_uuids(&top_uuids)
+        let rows = conn.get_relates_to_by_uuids(&top_uuids)?;
+        Ok(order_by_rank(rows, &top_uuids, |e| &e.uuid))
     })
     .await??;
 
@@ -149,6 +171,35 @@ pub async fn hybrid_edge_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_by_rank_follows_the_fused_ranking_not_fetch_order() {
+        // Rows as a storage-order `WHERE uuid IN` lookup might return them.
+        let fetched = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let ranked = vec![
+            "c".to_string(),
+            "a".to_string(),
+            "d".to_string(),
+            "b".to_string(),
+        ];
+        let ordered = order_by_rank(fetched, &ranked, |s| s.as_str());
+        assert_eq!(ordered, ranked);
+    }
+
+    #[test]
+    fn order_by_rank_puts_unranked_rows_last() {
+        let fetched = vec!["x".to_string(), "b".to_string(), "a".to_string()];
+        let ranked = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            order_by_rank(fetched, &ranked, |s| s.as_str()),
+            vec!["a", "b", "x"]
+        );
+    }
 
     #[test]
     fn test_rrf_fuse_empty() {
