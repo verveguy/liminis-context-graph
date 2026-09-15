@@ -1,0 +1,5 @@
+# Test fixtures are compared byte-for-byte (e.g. wal_serialization.rs pins the exact serialized
+# WAL line). With Git for Windows' default core.autocrlf=true, checkout rewrote them with CRLF
+# and the pinned comparison failed on a trailing `\r` (#581). `-text` turns off end-of-line
+# conversion for them on every platform, so the working tree matches the repository exactly.
+crates/core/tests/fixtures/** -text

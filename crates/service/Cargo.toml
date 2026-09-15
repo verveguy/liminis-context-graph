@@ -24,5 +24,15 @@ rmcp = { workspace = true }
 libc = "0.2"
 signal-hook-registry = "1"
 
+# Named-pipe transport (src/transport.rs, #581): owner-only pipe DACL. Same major as tokio's own
+# windows-sys, so no second copy is compiled.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -60,9 +60,10 @@ const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.18.1";
 const EXTENSION_NAMES: [&str; 2] = ["vector", "fts"];
 
 /// Maps the running binary's OS/arch to lbug's own extension-directory platform string.
-/// Empirically confirmed (issue #559 Research) against the three release targets configured
-/// in `Cargo.toml`'s `workspace.metadata.dist.targets`. Any other OS/arch combination
-/// (including Windows, not currently a release target) returns `None`, which makes
+/// Empirically confirmed (issue #559 Research) against the release targets configured in
+/// `Cargo.toml`'s `workspace.metadata.dist.targets`; `win_amd64` was confirmed against the
+/// extension CDN for #581 (`windows_amd64` and `windows_x86_64` both 404 — the string is
+/// exactly `win_amd64`). Any other OS/arch combination returns `None`, which makes
 /// `resolve_extension_files` a no-op there — falling straight through to lbug's own default
 /// behavior, same as if no bundle were found.
 fn platform_string() -> Option<&'static str> {
@@ -70,6 +71,7 @@ fn platform_string() -> Option<&'static str> {
         ("macos", "aarch64") => Some("osx_arm64"),
         ("linux", "x86_64") => Some("linux_amd64"),
         ("linux", "aarch64") => Some("linux_arm64"),
+        ("windows", "x86_64") => Some("win_amd64"),
         _ => None,
     }
 }

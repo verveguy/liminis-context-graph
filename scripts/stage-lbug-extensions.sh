@@ -6,7 +6,7 @@
 #   scripts/stage-lbug-extensions.sh <platform> <dest-dir>
 #
 #   <platform>  one of lbug's own extension-directory platform strings: osx_arm64,
-#               linux_amd64, linux_arm64 (see crates/core/src/lbug_extension_home.rs's
+#               linux_amd64, linux_arm64, win_amd64 (see crates/core/src/lbug_extension_home.rs's
 #               platform_string(), which must stay in lockstep with this script).
 #   <dest-dir>  directory to stage into. This script creates
 #               <dest-dir>/.lbdb/extension/<LBUG_EXTENSION_VERSION>/<platform>/{vector,fts}/ —
@@ -42,8 +42,8 @@ platform="$1"
 dest="$2"
 
 case "$platform" in
-  osx_arm64|linux_amd64|linux_arm64) ;;
-  *) die "unrecognized platform '$platform' — must be one of osx_arm64, linux_amd64, linux_arm64 (see crates/core/src/lbug_extension_home.rs's platform_string())" ;;
+  osx_arm64|linux_amd64|linux_arm64|win_amd64) ;;
+  *) die "unrecognized platform '$platform' — must be one of osx_arm64, linux_amd64, linux_arm64, win_amd64 (see crates/core/src/lbug_extension_home.rs's platform_string())" ;;
 esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

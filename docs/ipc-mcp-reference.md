@@ -10,8 +10,37 @@ through the same core dispatch in
 [`crates/core/src/handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
 no graph logic is duplicated between them:
 
-- **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
+- **JSON-RPC 2.0 over a local socket** (default). Newline-delimited requests/responses over `.lcg/service.sock` — a Unix domain socket on macOS/Linux, a named pipe on Windows (see [Windows: named pipe](#windows-named-pipe)).
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
+
+### Windows: named pipe
+
+On Windows the service serves the identical protocol over a named pipe, because `AF_UNIX` is not
+usable from Rust's tokio, Node or CPython there (issue #581). `LCG_SOCKET_PATH` keeps its meaning —
+it still names the workspace's endpoint — and maps to a pipe:
+
+- **Discovery.** At bind the service writes the pipe name to `.lcg/service.endpoint` (the socket
+  path with its extension replaced). Clients should read that file.
+- **Name.** `\\.\pipe\lcg-<16 hex digits>`: FNV-1a 64-bit over the UTF-8 bytes of the absolute
+  socket path, lower-cased, with `/` replaced by `\`. Stable per workspace, so a client that cannot
+  read the file can compute it. A `LCG_SOCKET_PATH` (or `--connect`) that is already a
+  `\\.\pipe\…` name is used as-is.
+- **Access.** Only the user the service runs as (and SYSTEM) can connect; remote clients are
+  refused, and a second process cannot bind the same pipe name.
+- **Signals.** Closing the console, logoff/shutdown, Ctrl+Break and Ctrl+C all trigger the same
+  graceful shutdown SIGTERM/SIGINT do on Unix.
+
+A pipe opens like a file, so a client needs no socket library:
+
+```python
+import json
+endpoint = open(".lcg/service.endpoint").read().strip()      # \\.\pipe\lcg-…
+with open(endpoint, "r+b", buffering=0) as pipe:
+    pipe.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "health_check", "params": {}}) + "\n").encode())
+    print(json.loads(pipe.readline()))
+```
+
+In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
 ## IPC methods (45)
 
