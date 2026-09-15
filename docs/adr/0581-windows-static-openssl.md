@@ -45,7 +45,7 @@ is unchanged for macOS and Linux.
 - **Staging:** `scripts/stage-openssl-windows.sh` is the single mechanism, used by `release.yml`,
   `windows.yml` and local builds. It stages `libssl.lib`/`libcrypto.lib` under both the `ssl.lib`/
   `crypto.lib` names lbug 0.18.1 asked for and their own `libssl.lib`/`libcrypto.lib` names —
-  which lbug 0.20.4's Windows-specific link-lib branch asks for directly, per issue #561 — onto
+  which lbug 0.20.x's (0.20.3 included) Windows-specific link-lib branch asks for directly, per issue #561 — onto
   `LIB` (never `RUSTFLAGS`, which would bust cargo's cache and collide with cargo-dist). It detects
   a static install by the absence of OpenSSL DLLs in `<root>/bin`, and then exports `LINK` with the
   Windows system libraries plus `OPENSSL_STATIC=1`. A dynamic install still works for local

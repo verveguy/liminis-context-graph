@@ -9,9 +9,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
-lbug 0.18.1 → 0.20.4, superseding the 0.20.1 pin that `73d8c0cc` rolled back after a deterministic
-deadlock, and superseding an earlier draft of this change that targeted 0.20.2 before
-`ladybug#883` was closed upstream. **One-way storage migration (42 → 47) — read Upgrading.**
+lbug 0.18.1 → 0.20.3, superseding the 0.20.1 pin that `73d8c0cc` rolled back after a deterministic
+deadlock, an earlier draft of this change that targeted 0.20.2 before `ladybug#883` was closed
+upstream, and a later draft that targeted 0.20.4 (see *Why 0.20.3, not 0.20.4* below). **One-way storage migration (42 → 47) — read Upgrading.**
 
 ### Upgrading
 
@@ -33,8 +33,8 @@ deadlock, and superseding an earlier draft of this change that targeted 0.20.2 b
   that shipped. Covered by new re-execution regression tests exercising the exact pattern.
 - `ladybug#883` (a SIGSEGV in the cached-prepared-statement path, needing hundreds of
   parameterized queries in one session to surface) was closed upstream as fixed in 0.20.3, after
-  this issue's original evaluation of 0.20.2 (where it was still open). Since 0.20.4 postdates
-  that fix, this bump resolves it outright rather than merely working around it with the
+  this issue's original evaluation of 0.20.2 (where it was still open). Since 0.20.3 is the release
+  that fixed it, this bump resolves it outright rather than merely working around it with the
   `enable_cached_prepared_statement` escape hatch (still confirmed present and settable — see
   Internal below — but no longer a live mitigation for our pinned version).
 - Picks back up several fixes the 0.18.1 rollback deferred: `ladybug#845` (FTS heap corruption
@@ -43,14 +43,26 @@ deadlock, and superseding an earlier draft of this change that targeted 0.20.2 b
   (silent row loss in `LOAD FROM`/`UNWIND` feeding a `MATCH` primary-key predicate), `#894`
   (several planner bugs), and `#884` (an `ArrowResultCollector` downcast fix).
 
+### Why 0.20.3, not 0.20.4
+
+- On **Windows**, lbug 0.20.4's core crashes natively in the published `vector`/`fts` extensions
+  (`LadybugDB/ladybug#971`). Upstream publishes those extensions per minor version, and the
+  `v0.20.0/win_amd64` files are 0.20.2-era builds (their PE link time and highest embedded version
+  string both say so). They are ABI-compatible with the 0.20.2 and 0.20.3 cores but not 0.20.4's:
+  on 0.20.4, index creation fails (fts every time, vector intermittently); on 0.20.3 the same bytes
+  ran vector 110/110 and fts 25/25 clean, with both vcpkg and Shining Light OpenSSL DLLs.
+- 0.20.3 carries everything this upgrade was for: storage version 47 (the same 42 → 47 migration),
+  `LBUG_EXTENSION_VERSION` `0.20.0`, and the `ladybug#883` fix. Linux and macOS are unaffected by
+  the choice.
+
 ### Internal
 
 - The 0.20.1 deadlock that forced the original rollback does not reproduce under 0.20.2 or 0.20.4,
   per a retest in the same container shape that wedged deterministically before (reported upstream
   as `LadybugDB/ladybug#911`, now closed with the maintainer's acknowledgment).
-- `LBUG_EXTENSION_VERSION` stays at `0.20.0` (not `0.20.4`) — the lbug 0.20.4 crate compiles
+- `LBUG_EXTENSION_VERSION` stays at `0.20.0` (not `0.20.3`) — the lbug 0.20.3 crate compiles
   against and the CDN publishes under extension-directory version `0.20.0`, the same divergence
-  from crate semver confirmed for 0.20.2 (re-verified directly against the 0.20.4 crate's
+  from crate semver confirmed for 0.20.2 and 0.20.4 (re-verified directly against the 0.20.3 crate's
   `lbug-src/CMakeLists.txt` and the live CDN for all four supported platforms, including
   `win_amd64`). Getting this wrong either fails loudly (a 404 during staging) or, if bytes were
   hand-staged under a mismatched directory name, would silently reintroduce the CDN dependency
@@ -59,12 +71,12 @@ deadlock, and superseding an earlier draft of this change that targeted 0.20.2 b
 - `enable_cached_prepared_statement`, present since the 0.20.2 bundle, is confirmed present and
   settable as an operator escape hatch (`CALL enable_cached_prepared_statement='NONE'`). It was
   originally added here as a mitigation for `ladybug#883`, which is now fixed outright in our
-  pinned 0.20.4 (see Fixed above), so the lever is kept as defense-in-depth rather than a live
+  pinned 0.20.3 (see Fixed above), so the lever is kept as defense-in-depth rather than a live
   workaround. It is not enabled by default. A 1,200-iteration single-session regression test found
   no crash, hang, or stale result.
 - `scripts/stage-openssl-windows.sh` (ADR-0581) now stages vcpkg's `libssl.lib`/`libcrypto.lib`
   under both the `ssl.lib`/`crypto.lib` names lbug 0.18.1 asked for and their own names, which
-  lbug 0.20.4 asks for directly on Windows via a link-lib branch 0.18.1 didn't have. Without this,
+  lbug 0.20.x (0.20.3 included) asks for directly on Windows via a link-lib branch 0.18.1 didn't have. Without this,
   the Windows release build fails to link with `LNK1181: cannot open input file 'libssl.lib'`.
 
 ## [0.14.3] - 2026-09-15

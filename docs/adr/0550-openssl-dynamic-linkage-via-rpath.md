@@ -101,7 +101,7 @@ explicitly *not* by static linking or bundling.
 This differs across the versions we have pinned, and the difference decides which
 lever actually works:
 
-| | 0.18.1 | 0.20.1 – 0.20.4 (0.20.4 current pin) |
+| | 0.18.1 | 0.20.1 – 0.20.4 (0.20.3 current pin) |
 |---|---|---|
 | `OPENSSL_DIR` / `OPENSSL_ROOT_DIR` | **not read** | checked first, returns immediately |
 | vcpkg | not used | tried, returns if found |
@@ -118,11 +118,11 @@ On **0.20.1 – 0.20.4** the pkg-config branch does *not* return, so the Homebre
 keg — with its `.dylib` files and absolute install names — is added to the
 search path alongside the staged directory, and satisfying pkg-config is not
 enough on its own. Only the `OPENSSL_DIR` branch returns early. 0.20.1 and
-0.20.3 themselves were never shipped (0.20.1 deadlocks, `ladybug#911`, see
-#556; 0.20.3 was superseded by 0.20.4 before the pin moved past 0.20.2, see
-#561), but `build.rs`'s OpenSSL-discovery logic is unchanged across the whole
+0.20.4 were never shipped (0.20.1 deadlocks, `ladybug#911`, see #556; 0.20.4's
+core is ABI-incompatible with the published Windows extensions, `ladybug#971`,
+so #561 pins 0.20.3), but `build.rs`'s OpenSSL-discovery logic is unchanged across the whole
 0.20.1–0.20.4 range — confirmed via direct inspection of each crate's `build.rs`
-(see #561) — so this column's behavior is what the current 0.20.4 pin actually
+(see #561) — so this column's behavior is what the current 0.20.3 pin actually
 exercises.
 
 ### Why link time, not post-build

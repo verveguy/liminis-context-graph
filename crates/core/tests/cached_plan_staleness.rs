@@ -95,7 +95,7 @@ fn many_reexecutions_all_reflect_the_latest_write() {
 /// Background item 4 / issue #561: confirms `enable_cached_prepared_statement` (present in the
 /// 0.20.2 bundle, absent in 0.20.1) is a settable runtime pragma. `ladybug#883` (the SIGSEGV
 /// this lever was originally meant to defuse) was closed upstream as fixed in 0.20.3, and this
-/// issue's actual pin (0.20.4) postdates that fix -- so the lever is no longer needed as a live
+/// issue's actual pin is 0.20.3 -- so the lever is no longer needed as a live
 /// mitigation for our pinned version, but it's still confirmed present as defense-in-depth for
 /// any future regression in the cached-prepared-statement path. Out of Scope: this issue does
 /// not enable it by default, so this only proves the lever exists and works -- it does not

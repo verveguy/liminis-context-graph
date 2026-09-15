@@ -38,7 +38,7 @@ use crate::error::Error;
 ///
 /// **Not derivable from `lbug::VERSION` at the crate-semver level.** Research for issue #559
 /// found the mapping isn't always exact-match — a `0.19.1` crate pin resolved to extension
-/// directory `0.19.0`, and `0.20.1` through `0.20.4` all resolve to `0.20.0` — so this must be
+/// directory `0.19.0`, and `0.20.1` through `0.20.4` all resolve to `0.20.0` (current pin: 0.20.3) — so this must be
 /// re-verified empirically (probe a real `INSTALL vector` against the pinned version, or check
 /// `https://extension.ladybugdb.com/v<N>/...`) every time the `lbug` workspace dependency pin
 /// moves, and updated by hand. See ADR-0559 and `extension_version_was_verified_against_current_lbug_pin`

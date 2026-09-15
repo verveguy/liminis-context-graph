@@ -112,7 +112,7 @@ The extension-directory version segment is **not a derivable function of the `lb
 semver** — it's whatever version string is baked into that specific native build, which usually
 but not always matches the crate's patch version. Empirically: the `0.18.1` pin resolves to
 directory `0.18.1` (exact match), but a `0.19.1` pin resolved to directory `0.19.0`, and both
-`0.20.1` and `0.20.2` resolved to directory `0.20.0`. This must be re-verified by hand
+`0.20.1` through `0.20.4` (including the current `0.20.3` pin) resolve to directory `0.20.0`. This must be re-verified by hand
 (`INSTALL vector` against the pinned version with an empty `HOME`, or checking
 `https://extension.ladybugdb.com/v<N>/...`) every time the `lbug` workspace pin moves.
 

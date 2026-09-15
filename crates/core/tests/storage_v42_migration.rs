@@ -1,11 +1,11 @@
 // User Story 4 / FR-006 (issue #561): a pre-existing database at storage version 42 (created
 // under lbug 0.18.1, storage version 42 -- what v0.14.0 and v0.14.1 both shipped) must open
-// under the current lbug-0.20.4-pinned binary, migrate in place (42 -> 47), and serve correct
+// under the current lbug-0.20.3-pinned binary, migrate in place (42 -> 47), and serve correct
 // reads, with no manual operator step.
 //
 // The fixture (crates/core/tests/fixtures/storage_v42_db/t.db.tar.gz) was generated once by
 // opening a fresh Db at this repo's then-current HEAD (already pinned to lbug 0.18.1, before the
-// pins in this same commit series moved to 0.20.4) and writing two Entity nodes plus one
+// pins in this same commit series moved to 0.20.x) and writing two Entity nodes plus one
 // RELATES_TO edge with known, hardcoded values via the engine's own public API, then copying the
 // resulting `t.db` out -- no historical checkout was needed this time, since HEAD already wrote
 // storage version 42. See storage_v41_migration.rs for the structurally identical precedent.
@@ -46,7 +46,7 @@ fn storage_v42_database_opens_and_migrates_with_correct_reads() {
         "expected t.db to be present after extracting the storage-v42 fixture"
     );
 
-    // Opening a storage-v42 database under the current (0.20.4-pinned) binary must succeed with
+    // Opening a storage-v42 database under the current (0.20.3-pinned) binary must succeed with
     // no manual operator step. The on-disk rewrite to the current storage version happens at the
     // first checkpoint (see CHANGELOG.md), not necessarily at open -- this test doesn't force a
     // checkpoint or assert the storage version, only that open is automatic and reads are correct.
