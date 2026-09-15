@@ -9,7 +9,7 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-09-15
+## [0.14.3] - 2026-09-15
 
 **Windows is now a supported platform**, and hybrid search returns results in ranked order rather
 than insertion order. No migration; `lbug` stays pinned at 0.18.1.
@@ -53,7 +53,7 @@ than insertion order. No migration; `lbug` stays pinned at 0.18.1.
 - **`lbug` stays at 0.18.1.** The published Windows `vector` and `fts` extensions for the entire
   lbug 0.20.x line crash the process — a regression from 0.19.0, reproducible with LadybugDB's own
   CLI and unrelated to lcg. The lbug upgrade is deferred until that is fixed upstream, so all four
-  platforms can move together. See [docs/releases/0.15.0.md](docs/releases/0.15.0.md).
+  platforms can move together. See [docs/releases/0.14.3.md](docs/releases/0.14.3.md).
 
 ## [0.14.2] - 2026-09-10
 
