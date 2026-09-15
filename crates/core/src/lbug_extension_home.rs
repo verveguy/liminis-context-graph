@@ -157,9 +157,10 @@ fn resolve_from(
 ///
 /// 1. `LCG_LBUG_HOME` env var override (Story 2) — the operator's escape hatch for a
 ///    non-standard layout.
-/// 2. A directory derived from `std::env::current_exe()`'s parent — the layout a release
-///    archive bundles files under (Story 1, FR-004): the binary sits at the archive's top
-///    level, with a `.lbdb/` sibling directory.
+/// 2. The directory of the *real* running binary — `std::env::current_exe()` canonicalized
+///    through any symlink it was launched via (see [`exe_dir`]) — the layout a release archive
+///    bundles files under (Story 1, FR-004): the binary sits at the archive's top level, with a
+///    `.lbdb/` sibling directory.
 /// 3. Neither resolves: `Ok(None)`. `Db::open` falls back to lbug's own default (`INSTALL`,
 ///    user home directory, download on demand) — Story 3, the required non-regression path.
 pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error> {
@@ -181,17 +182,89 @@ pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error>
             )));
         }
     };
-    let exe_root = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    resolve_from(env_root.as_deref(), exe_dir().as_deref(), platform)
+}
 
-    resolve_from(env_root.as_deref(), exe_root.as_deref(), platform)
+/// The directory of the *real* running binary. `current_exe()` alone is not enough: on macOS
+/// and Windows it reports the path the process was launched as, so a binary started through a
+/// symlink (e.g. a stable `~/bin/lcg-service` pointing into a versioned install) resolved tier 2
+/// against the link's directory, never found the `.lbdb` bundle beside the real binary, and lbug
+/// silently fell back to downloading from the CDN — voiding #559's offline guarantee with no
+/// error.
+fn exe_dir() -> Option<PathBuf> {
+    exe_dir_from(std::env::current_exe().ok()?)
+}
+
+/// [`exe_dir`] over an explicit launched path, so the symlink handling is testable (the test
+/// binary itself can't be re-launched through a link). Canonicalizing follows the link; if that
+/// fails, the launched path is still the best remaining guess.
+fn exe_dir_from(exe: PathBuf) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(&exe)
+        .map(strip_verbatim_prefix)
+        .unwrap_or(exe);
+    real.parent().map(Path::to_path_buf)
+}
+
+/// `std::fs::canonicalize` on Windows returns a verbatim `\\?\C:\…` path. The extension paths
+/// built from it are handed to lbug's `LOAD EXTENSION` as strings, so return the ordinary
+/// drive-letter form when there is one (verbatim UNC paths are left as they are).
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    /// The regression the fix targets: a binary launched through a symlink must resolve the
+    /// bundle directory beside the *target*, not beside the link.
+    #[cfg(unix)]
+    #[test]
+    fn exe_dir_follows_a_symlink_to_the_real_binary() {
+        let real_dir = tempfile::tempdir().unwrap();
+        let link_dir = tempfile::tempdir().unwrap();
+        let binary = real_dir.path().join("liminis-context-graph");
+        fs::write(&binary, b"stub").unwrap();
+        let link = link_dir.path().join("lcg-service");
+        std::os::unix::fs::symlink(&binary, &link).unwrap();
+
+        // Canonical on both sides: macOS temp dirs live under the /var -> /private/var symlink.
+        let expected = fs::canonicalize(real_dir.path()).unwrap();
+        assert_eq!(exe_dir_from(link), Some(expected));
+    }
+
+    #[test]
+    fn exe_dir_falls_back_to_the_launched_path_when_it_cannot_be_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("liminis-context-graph");
+        assert_eq!(
+            exe_dir_from(missing.clone()),
+            missing.parent().map(Path::to_path_buf)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefix_is_stripped_from_drive_paths_only() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\lcg\bin")),
+            PathBuf::from(r"C:\lcg\bin")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\lcg")),
+            PathBuf::from(r"\\?\UNC\server\share\lcg")
+        );
+    }
 
     fn write_stub_bundle(root: &Path, version: &str, platform: &str) {
         let dir = root
