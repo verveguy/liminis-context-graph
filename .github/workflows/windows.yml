@@ -80,10 +80,10 @@ jobs:
 
       # lbug's build.rs asks MSVC for ssl.lib/crypto.lib; stage renamed static libs onto LIB and
       # export LINK with the Windows system libraries static OpenSSL needs. See the script's header.
+      # No OPENSSL_DIR: its only reader, openssl-sys, is not built for the MSVC target (native-tls
+      # uses SChannel on Windows), so this job now configures OpenSSL exactly as release.yml does.
       - name: Stage OpenSSL for the MSVC linker
-        run: |
-          echo "OPENSSL_DIR=$VCPKG_INSTALLATION_ROOT\\installed\\$OPENSSL_TRIPLET" >> "$GITHUB_ENV"
-          bash scripts/stage-openssl-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/$OPENSSL_TRIPLET"
+        run: bash scripts/stage-openssl-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/$OPENSSL_TRIPLET"
 
       - name: Restore lbug extension bundle from cache
         id: lbug-ext-cache

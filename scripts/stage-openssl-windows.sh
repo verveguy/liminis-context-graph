@@ -16,7 +16,10 @@
 # and `crypto.lib` — but every OpenSSL 3 distribution for Windows (vcpkg, the Shining Light
 # installers, a source build) names them `libssl.lib` and `libcrypto.lib`. The link fails with
 # `LNK1181: cannot open input file 'ssl.lib'` even when OpenSSL is installed and OPENSSL_DIR is
-# set (OPENSSL_DIR is read by openssl-sys, not by lbug).
+# set (OPENSSL_DIR is read by openssl-sys, not by lbug). openssl-sys is not built for the MSVC
+# target at all — it reaches lcg only through native-tls, which uses SChannel on Windows (and
+# Security.framework on macOS) — so no Windows workflow needs OPENSSL_DIR; lbug is the sole
+# OpenSSL consumer there. Check with: cargo tree --target x86_64-pc-windows-msvc -i openssl-sys
 #
 # HOW
 #
