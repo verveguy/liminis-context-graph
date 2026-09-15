@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "lcg-core"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "lcg-eval"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "futures",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "lcg-service"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "lcg-core",
  "libc",
