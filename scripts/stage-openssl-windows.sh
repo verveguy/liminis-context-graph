@@ -20,12 +20,20 @@
 #
 # HOW
 #
-# Copies the two import libraries under the names lbug asks for into a staging directory and
-# prepends that directory to LIB, the MSVC linker's library search path. LIB rather than
-# `RUSTFLAGS=-L`: changing RUSTFLAGS invalidates cargo's whole build cache and collides with
-# cargo-dist's own flags, while LIB is read by link.exe alone. The staged copies are link-time
-# fixtures; the runtime DLLs (libssl-3-x64.dll, libcrypto-3-x64.dll, in <openssl-root>/bin) must
-# still be on PATH or beside the executable.
+# Copies the two libraries under the names lbug asks for into a staging directory and prepends
+# that directory to LIB, the MSVC linker's library search path. LIB rather than `RUSTFLAGS=-L`:
+# changing RUSTFLAGS invalidates cargo's whole build cache and collides with cargo-dist's own
+# flags, while LIB is read by link.exe alone.
+#
+# Two kinds of <openssl-root>, told apart by whether <root>/bin holds the OpenSSL DLLs:
+#
+#   static  (vcpkg x64-windows-static-md — what release builds use, ADR-0581): libssl.lib and
+#           libcrypto.lib are the code itself, so the binary needs no OpenSSL DLL at runtime.
+#           Static OpenSSL depends on Windows system libraries lbug's build.rs never names, so
+#           this also exports LINK (link.exe's extra-inputs variable) with them.
+#   dynamic (vcpkg x64-windows, Shining Light): the .lib files are import libraries and the
+#           runtime DLLs (libssl-3-x64.dll, libcrypto-3-x64.dll) in <root>/bin must be on PATH or
+#           beside the executable, so <root>/bin is added to PATH.
 #
 # Mirrors scripts/stage-openssl-rpath.sh (the macOS equivalent, ADR-0550). A no-op elsewhere.
 
@@ -52,13 +60,33 @@ cp "$root/lib/libssl.lib" "$stage/ssl.lib"
 cp "$root/lib/libcrypto.lib" "$stage/crypto.lib"
 note "staged ssl.lib and crypto.lib from $root/lib -> $stage"
 
+# Static OpenSSL's Windows system-library dependencies (sockets, certificate store, user32 for
+# its console UI hooks, advapi32 for the registry/crypto provider).
+system_libs="ws2_32.lib crypt32.lib user32.lib advapi32.lib"
+
+if compgen -G "$root/bin/libssl-3*.dll" > /dev/null; then
+  kind=dynamic
+else
+  kind=static
+fi
+note "OpenSSL at $root is $kind"
+
 stage_win="$(cygpath -w "$stage")"
-bin_win="$(cygpath -w "$root/bin")"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "LIB=${stage_win};${LIB:-}" >> "$GITHUB_ENV"
-  echo "$bin_win" >> "$GITHUB_PATH"
-  note "appended LIB and PATH to \$GITHUB_ENV/\$GITHUB_PATH"
+  if [[ "$kind" == static ]]; then
+    echo "LINK=${system_libs}${LINK:+ $LINK}" >> "$GITHUB_ENV"
+    echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+  else
+    cygpath -w "$root/bin" >> "$GITHUB_PATH"
+  fi
+  note "appended to \$GITHUB_ENV/\$GITHUB_PATH"
 else
   printf 'export LIB=%q\n' "${stage_win};${LIB:-}"
-  printf 'export PATH=%q\n' "$root/bin:$PATH"
+  if [[ "$kind" == static ]]; then
+    printf 'export LINK=%q\n' "${system_libs}${LINK:+ $LINK}"
+    printf 'export OPENSSL_STATIC=1\n'
+  else
+    printf 'export PATH=%q\n' "$root/bin:$PATH"
+  fi
 fi

@@ -23,7 +23,15 @@ strip = "debuginfo"
 [workspace.metadata.dist]
 cargo-dist-version = "0.32.0"
 ci = ["github"]
-installers = ["shell"]
+# powershell: the irm|iex installer for the x86_64-pc-windows-msvc archive (#581).
+installers = ["shell", "powershell"]
+# Link the MSVC C runtime dynamically on Windows (dist's default is static, +crt-static).
+# lbug's prebuilt lbug.lib is compiled /MD (dynamic CRT); with +crt-static the cxx crate's C++
+# objects compile /MT, and the release link fails with LNK2038 "RuntimeLibrary mismatch
+# MT_StaticRelease vs MD_DynamicRelease" plus duplicate std:: symbols (#581's first Windows
+# `dist build`). Consequence: the Windows .exe needs the Visual C++ runtime (vcruntime140.dll),
+# as any /MD build does — see ADR-0581.
+msvc-crt-static = false
 # Build the platform artifacts on pull requests, not only on tags. Without this,
 # `build-local-artifacts` is gated off for PRs and the release path is exercised
 # for the first time by the tag itself — which is exactly how ADR-0398's static
@@ -38,6 +46,9 @@ targets = [
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
+  # Windows (#581): named-pipe transport since #582. OpenSSL for this target is staged by a
+  # Windows-only step in release.yml, not by a dist dependency table — see that step.
+  "x86_64-pc-windows-msvc",
 ]
 # .lbdb: the bundled lbug vector/fts extension binaries staged per-target by
 # scripts/stage-lbug-extensions.sh (invoked from .github/build-setup.yml before `dist build`

@@ -58,12 +58,15 @@
 # lockstep with crates/core/src/lbug_extension_home.rs's platform_string() — a 4th release
 # target needs both updated together.
 - name: Stage lbug vector/fts extensions for this target
+  # bash explicitly: the Windows runner's default shell is PowerShell (#581).
+  shell: bash
   run: |
     set -euo pipefail
     case "${{ join(matrix.targets, '') }}" in
       aarch64-apple-darwin) platform=osx_arm64 ;;
       x86_64-unknown-linux-gnu) platform=linux_amd64 ;;
       aarch64-unknown-linux-gnu) platform=linux_arm64 ;;
+      x86_64-pc-windows-msvc) platform=win_amd64 ;;
       *)
         echo "no lbug extension platform mapping for target '${{ join(matrix.targets, '') }}' — update .github/build-setup.yml, .github/workflows/release.yml, and crates/core/src/lbug_extension_home.rs together" >&2
         exit 1
