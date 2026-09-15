@@ -62,6 +62,10 @@ deadlock, and superseding an earlier draft of this change that targeted 0.20.2 b
   pinned 0.20.4 (see Fixed above), so the lever is kept as defense-in-depth rather than a live
   workaround. It is not enabled by default. A 1,200-iteration single-session regression test found
   no crash, hang, or stale result.
+- `scripts/stage-openssl-windows.sh` (ADR-0581) now stages vcpkg's `libssl.lib`/`libcrypto.lib`
+  under both the `ssl.lib`/`crypto.lib` names lbug 0.18.1 asked for and their own names, which
+  lbug 0.20.4 asks for directly on Windows via a link-lib branch 0.18.1 didn't have. Without this,
+  the Windows release build fails to link with `LNK1181: cannot open input file 'libssl.lib'`.
 
 ## [0.14.3] - 2026-09-15
 
