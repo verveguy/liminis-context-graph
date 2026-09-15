@@ -180,9 +180,12 @@ impl Db {
             // shipped beside them in the bundle; this puts that directory on the DLL search path
             // (SetDllDirectoryW) before lbug's plain LoadLibraryW. Deliberately process-global —
             // it also removes the current directory from the search order, which is intended for a
-            // service process, and any later DLL load in lcg inherits it. Race-free only because
-            // Db::open holds OPEN_LOCK here; revisit this call if that lock is ever removed.
-            // A no-op on other platforms.
+            // service process, and any later DLL load in lcg inherits it. OPEN_LOCK only keeps
+            // concurrent Db::open calls from racing each other over this setting; it does not
+            // stop another thread in the process from calling LoadLibrary (directly or through
+            // another crate) while the search path changes. In lcg's single-database service
+            // process nothing else loads DLLs concurrently with opening the DB, so that is
+            // accepted rather than guarded. A no-op on other platforms.
             crate::lbug_extension_home::expose_extension_dependencies(&files)?;
             for path in [&files.vector, &files.fts] {
                 // `to_string_lossy()` would silently replace invalid bytes, which could turn a
