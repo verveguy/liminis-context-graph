@@ -9,6 +9,52 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-15
+
+**Windows is now a supported platform**, and hybrid search returns results in ranked order rather
+than insertion order. No migration; `lbug` stays pinned at 0.18.1.
+
+### Added
+
+- **Windows (x64) support.** `lcg-service` builds and runs on Windows, using a **named-pipe** IPC
+  transport in place of the Unix domain socket. Every pipe instance carries a protected DACL
+  granting only the service's own user and SYSTEM (the default pipe DACL grants Everyone read),
+  refuses remote clients, and claims its name with `FILE_FLAG_FIRST_PIPE_INSTANCE`. The service
+  writes the pipe name to `.lcg/service.endpoint` so clients in other languages can discover it,
+  and Windows console-control events drive clean shutdown. (#581, #582)
+- **A published Windows artifact**, `x86_64-pc-windows-msvc`, installable via a new PowerShell
+  installer or the `.zip`. OpenSSL is linked **statically** into the executable — a deliberate
+  Windows-only exception to ADR-0550's dynamic posture, since an archive cannot carry DLLs for one
+  target and no Windows package manager would patch a DLL we shipped. The two OpenSSL DLLs that
+  lbug's own extensions import are bundled beside them and resolved at load time. Consequence: an
+  OpenSSL CVE fix requires a new lcg release on Windows, where macOS and Linux pick it up from the
+  system. See [ADR-0581](docs/adr/0581-windows-static-openssl.md). (#585, #586)
+
+### Fixed
+
+- **`find_entities` and `find_relationships` returned results in insertion order, not ranked
+  order.** Both fetch rows with a `WHERE uuid IN` lookup carrying no `ORDER BY`, so the RRF-fused
+  ranking computed immediately beforehand was discarded — every hybrid search returned the correct
+  top-k *set* in an arbitrary order. Rows now follow the fused ranking. (#584)
+- **Bundled lbug extensions were not found when lcg was launched through a symlink.** On macOS and
+  Windows `current_exe()` reports the path the process was launched as, so a stable symlink into a
+  versioned install resolved the bundle against the link's directory, missed the `.lbdb` tree beside
+  the real binary, and silently fell back to downloading from the CDN — voiding 0.14.2's offline
+  guarantee with no error. The executable path is now canonicalized. (#583)
+
+### Windows notes
+
+- **Requires the Microsoft Visual C++ Redistributable (x64, 2015–2022).** It is not bundled and is
+  present on most machines; without it the executable fails to start with a loader error.
+- **Verified on Windows 11 x64.** Windows 10 and Windows ARM are untested; no Windows ARM build is
+  published.
+- **Downstream clients must read `.lcg/service.endpoint`** to locate the pipe. `orac` does; the
+  Liminis app and `liminis-framework` do not yet.
+- **`lbug` stays at 0.18.1.** The published Windows `vector` and `fts` extensions for the entire
+  lbug 0.20.x line crash the process — a regression from 0.19.0, reproducible with LadybugDB's own
+  CLI and unrelated to lcg. The lbug upgrade is deferred until that is fixed upstream, so all four
+  platforms can move together. See [docs/releases/0.14.3.md](docs/releases/0.14.3.md).
+
 ## [0.14.2] - 2026-09-10
 
 A maintenance release: the MCP front-end no longer hard-fails when the daemon is down, and a new
