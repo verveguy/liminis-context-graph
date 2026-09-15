@@ -58,6 +58,8 @@
 # lockstep with crates/core/src/lbug_extension_home.rs's platform_string() — a 4th release
 # target needs both updated together.
 - name: Stage lbug vector/fts extensions for this target
+  # bash explicitly: the Windows runner's default shell is PowerShell (#581).
+  shell: bash
   run: |
     set -euo pipefail
     case "${{ join(matrix.targets, '') }}" in

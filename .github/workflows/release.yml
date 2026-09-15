@@ -131,11 +131,17 @@ jobs:
       # LBUG_BUILD_FROM_SOURCE removed: the lbug prebuilt is a fat bundle (no longer
       # fully self-contained — OpenSSL links externally since 0.18.0).
       # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
+      # `shell: bash` on every hand-added step that is bash: the Windows runner's default shell
+      # is PowerShell, which silently produced empty values for these two (cache key
+      # `lbug-cache-Windows---…`) and failed outright on the extension-staging `case`. Not a
+      # job-level default — cargo-dist's generated `Install dist` step is PowerShell on Windows.
       - name: "Get rustc version for lbug cache key"
         id: "rustc-ver"
+        shell: bash
         run: "echo \"version=$(rustc --version | shasum -a 256 | cut -c1-8)\" >> \"$GITHUB_OUTPUT\""
       - name: "Get lbug version hash for lbug cache key"
         id: "lbug-hash"
+        shell: bash
         run: "echo \"hash=$(grep -A12 '^name = \"lbug\"$' Cargo.lock | shasum -a 256 | cut -c1-12)\" >> \"$GITHUB_OUTPUT\""
       - name: "Restore lbug build artifacts from cache"
         uses: "actions/cache/restore@v6"
@@ -163,6 +169,7 @@ jobs:
       # in lockstep with crates/core/src/lbug_extension_home.rs's platform_string() — a 4th
       # release target needs both updated together.
       - name: Stage lbug vector/fts extensions for this target
+        shell: bash
         run: |
           set -euo pipefail
           case "${{ join(matrix.targets, '') }}" in
