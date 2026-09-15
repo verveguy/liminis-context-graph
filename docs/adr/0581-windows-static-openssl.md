@@ -63,6 +63,14 @@ is unchanged for macOS and Linux.
   no package manager that removes it. When an OpenSSL CVE lands, a Windows release must pick up a
   newer vcpkg port (bump the runner's vcpkg or pin a newer baseline).
 - The binary grows by roughly the size of the OpenSSL objects actually used.
+- **The C runtime stays dynamic** (`msvc-crt-static = false` in `[workspace.metadata.dist]`).
+  "Static OpenSSL" does not mean a fully static binary. lbug's prebuilt `lbug.lib` is compiled
+  `/MD`, and cargo-dist's default `+crt-static` compiles the `cxx` bridge `/MT`. The first Windows
+  `dist build` failed to link on exactly that (`LNK2038 RuntimeLibrary mismatch`). So the shipped
+  `.exe` needs the Visual C++ runtime (`vcruntime140.dll` and friends). That runtime is present on
+  most Windows installs and on any machine with Visual Studio or a VC++ redistributable, but it is
+  not guaranteed on a pristine one, and it is **not** bundled. The vcpkg OpenSSL triplet is
+  `x64-windows-static-md` for the same reason: `/MD`, matching lbug.
 - The Windows linkage guard matches OpenSSL DLL names in the PE import table by string. That is
   deliberately simple (no `dumpbin`, which needs a Visual Studio developer shell), and it can only
   err toward failing a build, never toward passing a dynamic one.
