@@ -98,9 +98,12 @@ for bin in "$@"; do
       echo "assert-openssl-linkage.sh: OK — '$bin' resolves OpenSSL via SONAME"
       ;;
     MINGW*|MSYS*|CYGWIN*)
-      # PE imports name DLLs by bare file name in the binary's import table, so the
-      # names appear verbatim as ASCII — no dumpbin (which needs a VS dev shell) required.
-      dlls="$(grep -a -o -i -E 'lib(ssl|crypto)-3[-a-z0-9_]*\.dll' "$bin" | sort -u || true)"
+      # PE imports name DLLs by bare file name in the binary's import table, as
+      # NUL-terminated ASCII — no dumpbin (which needs a VS dev shell) required. Match
+      # only whole NUL-delimited strings: lbug 0.20.4 embeds an error message that
+      # *mentions* libssl-3-x64.dll/libcrypto-3-x64.dll, which a substring grep reads
+      # as an import.
+      dlls="$(tr '\0' '\n' < "$bin" | grep -a -i -x -E 'lib(ssl|crypto)-3[-a-z0-9_]*\.dll' | sort -u || true)"
       if [[ -n "$dlls" ]]; then
         echo "assert-openssl-linkage.sh: FAIL — '$bin' imports OpenSSL DLLs:" >&2
         echo "$dlls" >&2

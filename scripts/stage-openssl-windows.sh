@@ -67,7 +67,8 @@ done
 note "staged ssl.lib/libssl.lib and crypto.lib/libcrypto.lib from $root/lib -> $stage"
 
 # Static OpenSSL's Windows system-library dependencies (sockets, certificate store, user32 for
-# its console UI hooks, advapi32 for the registry/crypto provider).
+# its console UI hooks, advapi32 for the registry/crypto provider). lbug 0.20.x's build.rs emits
+# these four itself; the duplicate under 0.20.x is harmless and still needed on 0.18.x — keep it.
 system_libs="ws2_32.lib crypt32.lib user32.lib advapi32.lib"
 
 if compgen -G "$root/bin/libssl-3*.dll" > /dev/null; then
