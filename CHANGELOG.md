@@ -9,8 +9,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
-lbug 0.18.1 → 0.20.2, superseding the 0.20.1 pin that `73d8c0cc` rolled back after a deterministic
-deadlock. **One-way storage migration (42 → 47) — read Upgrading.**
+lbug 0.18.1 → 0.20.4, superseding the 0.20.1 pin that `73d8c0cc` rolled back after a deterministic
+deadlock, and superseding an earlier draft of this change that targeted 0.20.2 before
+`ladybug#883` was closed upstream. **One-way storage migration (42 → 47) — read Upgrading.**
 
 ### Upgrading
 
@@ -30,6 +31,12 @@ deadlock. **One-way storage migration (42 → 47) — read Upgrading.**
   within the same 0.20.x line, so the currently-shipping 0.18.1 does not appear to exhibit it —
   this is a forward-looking correctness fix, not a fix for a bug already present in a release
   that shipped. Covered by new re-execution regression tests exercising the exact pattern.
+- `ladybug#883` (a SIGSEGV in the cached-prepared-statement path, needing hundreds of
+  parameterized queries in one session to surface) was closed upstream as fixed in 0.20.3, after
+  this issue's original evaluation of 0.20.2 (where it was still open). Since 0.20.4 postdates
+  that fix, this bump resolves it outright rather than merely working around it with the
+  `enable_cached_prepared_statement` escape hatch (still confirmed present and settable — see
+  Internal below — but no longer a live mitigation for our pinned version).
 - Picks back up several fixes the 0.18.1 rollback deferred: `ladybug#845` (FTS heap corruption
   under concurrent scan/write — this service runs `CREATE_FTS_INDEX` and queries it concurrently
   as a live process), `#837` (primary-key-lookup alignment, which issue #221 depends on), `#864`
@@ -38,21 +45,23 @@ deadlock. **One-way storage migration (42 → 47) — read Upgrading.**
 
 ### Internal
 
-- The 0.20.1 deadlock that forced the original rollback does not reproduce under 0.20.2, per a
-  retest in the same container shape that wedged deterministically before (reported upstream as
-  `LadybugDB/ladybug#911`, now closed with the maintainer's acknowledgment).
-- `LBUG_EXTENSION_VERSION` moves to `0.20.0` (not `0.20.2`) — the lbug 0.20.2 crate compiles
-  against and the CDN publishes under extension-directory version `0.20.0`, a divergence from the
-  crate's own semver. Getting this wrong either fails loudly (a 404 during staging) or, if bytes
-  were hand-staged under a mismatched directory name, would silently reintroduce the CDN
-  dependency #559 removed; the latter is prevented structurally by `stage-lbug-extensions.sh`
-  being the sole writer of that directory tree, not by a runtime check.
-- `enable_cached_prepared_statement`, new in the 0.20.2 bundle, is confirmed present and settable
-  as an operator escape hatch (`CALL enable_cached_prepared_statement='NONE'`) for
-  `ladybug#883` — an open, unfixed SIGSEGV in the cached-prepared-statement path that needs
-  hundreds of parameterized queries in one session to surface. It is not enabled by default. A
-  1,200-iteration single-session regression test found no crash, hang, or stale result, reducing
-  but not eliminating this risk.
+- The 0.20.1 deadlock that forced the original rollback does not reproduce under 0.20.2 or 0.20.4,
+  per a retest in the same container shape that wedged deterministically before (reported upstream
+  as `LadybugDB/ladybug#911`, now closed with the maintainer's acknowledgment).
+- `LBUG_EXTENSION_VERSION` stays at `0.20.0` (not `0.20.4`) — the lbug 0.20.4 crate compiles
+  against and the CDN publishes under extension-directory version `0.20.0`, the same divergence
+  from crate semver confirmed for 0.20.2 (re-verified directly against the 0.20.4 crate's
+  `lbug-src/CMakeLists.txt` and the live CDN for all four supported platforms, including
+  `win_amd64`). Getting this wrong either fails loudly (a 404 during staging) or, if bytes were
+  hand-staged under a mismatched directory name, would silently reintroduce the CDN dependency
+  #559 removed; the latter is prevented structurally by `stage-lbug-extensions.sh` being the sole
+  writer of that directory tree, not by a runtime check.
+- `enable_cached_prepared_statement`, present since the 0.20.2 bundle, is confirmed present and
+  settable as an operator escape hatch (`CALL enable_cached_prepared_statement='NONE'`). It was
+  originally added here as a mitigation for `ladybug#883`, which is now fixed outright in our
+  pinned 0.20.4 (see Fixed above), so the lever is kept as defense-in-depth rather than a live
+  workaround. It is not enabled by default. A 1,200-iteration single-session regression test found
+  no crash, hang, or stale result.
 
 ## [0.14.3] - 2026-09-15
 

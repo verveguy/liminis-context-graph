@@ -1,10 +1,11 @@
-// User Story 6 / FR-009 (issue #561): ladybug#883 (an open, unfixed SIGSEGV in the
-// cached-prepared-statement path) needs "hundreds of parameterized queries in one session" to
-// surface, per upstream reports; the existing suite's short-lived sessions never reach that. This
-// test issues an order of magnitude more executions than the ~20-iteration deadlock retest cited
+// User Story 6 / FR-009 (issue #561): ladybug#883, a SIGSEGV in the cached-prepared-statement
+// path, needed "hundreds of parameterized queries in one session" to surface per upstream
+// reports; the existing suite's short-lived sessions never reached that. #883 was closed upstream
+// as fixed in 0.20.3, and this issue's pin (0.20.4) postdates that fix, so this test now confirms
+// the fix holds under sustained load rather than merely characterizing an open, unfixed risk. It
+// still issues an order of magnitude more executions than the ~20-iteration deadlock retest cited
 // in the issue's Background, against one open session, and confirms no crash, hang, or stale
-// result -- risk-characterization evidence for a residual, still-open upstream issue this bump
-// does not fix (Out of Scope), not a substitute for a real upstream fix.
+// result.
 
 use lcg_core::db::Db;
 use lcg_core::types::EntityRow;
