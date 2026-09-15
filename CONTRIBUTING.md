@@ -105,6 +105,30 @@ If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.
 
 ## Release runbook (maintainers)
 
+### Milestones are named, not numbered, until the release is cut
+
+**Unreleased milestones carry a symbolic name** — `Temporal`, `lbug 0.20.x upgrade`,
+`Chunking hardening` — and the version is decided at cut time, from whatever is actually ready.
+**Shipped milestones keep their version number**, because that is a historical fact rather than a
+plan. Do not create a `0.N.0` milestone for work that has not been scheduled.
+
+Why: a version number is a statement about *release order*, while a milestone is a bucket of
+*scope*. Pre-assigning the number couples the two, so any reordering forces a renumbering cascade.
+This is not hypothetical — 0.14.3 was prepared as "0.15.0", then had to be renumbered when the
+lbug upgrade was deferred out of it, which meant reopening an already-closed `0.14.3` milestone and
+left two unrelated bodies of work sharing one number. Naming the milestone instead makes "what
+ships next" a question of what is ready, answered at the moment it matters.
+
+Two rules that follow:
+
+- **Patch or minor is decided by content, not by size.** In this repo a **minor** means a storage
+  migration and/or a breaking API change — the things that make a reader need the Upgrading
+  section. Everything else is a **patch**, however substantial. 0.14.0 took the minor for a
+  one-way migration plus the `facts` -> `edges` rename; 0.14.2 shipped a whole new admin operation
+  as a patch; 0.14.3 added Windows as a supported platform as a patch, because it carried neither.
+- **A storage migration ships alone.** Make it the only notable change in its release, so a user
+  who hits trouble has one variable to consider and rollback is "go back one version".
+
 The release version lives in `[workspace.package]` in `Cargo.toml`; cargo-dist derives the
 release from it and **requires the pushed tag to match that version**, so the bump and the tag
 must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
