@@ -45,6 +45,8 @@ env:
   CARGO_TERM_COLOR: never
   # Static, as release builds link it (ADR-0581): what CI tests is what ships.
   OPENSSL_TRIPLET: x64-windows-static-md
+  # Dynamic triplet, only for the two DLLs lbug's win_amd64 extensions import (ADR-0581).
+  OPENSSL_DLL_TRIPLET: x64-windows
 
 jobs:
   windows:
@@ -94,6 +96,22 @@ jobs:
         if: steps.lbug-ext-cache.outputs.cache-hit != 'true'
         run: bash scripts/stage-lbug-extensions.sh win_amd64 lbug-extension-bundle
 
+      - name: Restore dynamic OpenSSL (vcpkg) from cache
+        id: openssl-dll-cache
+        uses: actions/cache@v6
+        with:
+          key: vcpkg-openssl-${{ env.OPENSSL_DLL_TRIPLET }}-${{ steps.vcpkg.outputs.commit }}
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed/${{ env.OPENSSL_DLL_TRIPLET }}
+
+      - name: Build dynamic OpenSSL (vcpkg) for the extension DLLs
+        if: steps.openssl-dll-cache.outputs.cache-hit != 'true'
+        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg" install "openssl:$OPENSSL_DLL_TRIPLET"'
+
+      # lbug's extension DLLs import libssl-3-x64.dll/libcrypto-3-x64.dll; ship them in the bundle,
+      # exactly as release.yml does, so CI exercises the same resolution lcg relies on.
+      - name: Bundle OpenSSL DLLs beside the lbug extensions
+        run: bash scripts/stage-openssl-dlls-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/$OPENSSL_DLL_TRIPLET" lbug-extension-bundle
+
       - name: Point Db::open at the staged extensions
         run: echo "LCG_LBUG_HOME=$(cygpath -w "$PWD/lbug-extension-bundle")" >> "$GITHUB_ENV"
 
@@ -103,8 +121,36 @@ jobs:
       - name: lcg-service unit tests (incl. named-pipe transport)
         run: cargo test -p lcg-service --bin liminis-context-graph
 
-      - name: Socket service end-to-end over the named pipe
-        run: cargo test -p lcg-service --test socket_service_e2e
+      # Run the e2e with a PATH *built from an allowlist*, not filtered from the inherited one. The
+      # inherited runner PATH is actively hostile to this test: several unrelated tools on it ship
+      # their own libssl-3-x64.dll / libcrypto-3-x64.dll, and any of them silently satisfies the lbug
+      # extensions' OpenSSL imports, making the e2e pass without proving the bundled DLLs work (#581).
+      # Seen so far: Git for Windows' mingw64\bin and usr\bin (hid the original bug locally), and
+      # C:\Program Files\MySQL\MySQL Server 8.0\bin on the windows-latest image (caught by the
+      # assertion below on this PR's first CI run). A blocklist of such directories is unbounded,
+      # so the step keeps only what it needs: the Rust toolchain and the Windows system directories.
+      # rustc locates link.exe itself (vswhere/registry), and the earlier clippy/test steps have
+      # already run every build script, so nothing else is required here. The assertion stays as a
+      # second guard: a pass must mean the bundle resolved the DLLs.
+      - name: Socket service end-to-end over the named pipe (no OpenSSL DLL on PATH)
+        shell: pwsh
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $env:Path = @(
+            (Join-Path $cargoHome 'bin'),
+            "$env:SystemRoot\System32",
+            $env:SystemRoot,
+            "$env:SystemRoot\System32\Wbem",
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0",
+            (Split-Path -Parent (Get-Process -Id $PID).Path)
+          ) -join ';'
+          Write-Host "PATH for this step: $env:Path"
+          foreach ($dll in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
+            $found = (Get-Command $dll -ErrorAction SilentlyContinue).Source
+            if ($found) { throw "$dll is still resolvable on PATH at $found — the e2e would not prove the bundle" }
+          }
+          cargo --version
+          cargo test -p lcg-service --test socket_service_e2e
 
       - name: Assert the service binary imports no OpenSSL DLL
         run: bash scripts/assert-openssl-linkage.sh target/debug/liminis-context-graph.exe

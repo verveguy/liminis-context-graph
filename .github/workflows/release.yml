@@ -249,6 +249,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: bash scripts/stage-openssl-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static-md"
+      # lbug's prebuilt win_amd64 extension DLLs import libssl-3-x64.dll/libcrypto-3-x64.dll — a
+      # property of lbug's Windows extensions, not of our bundling (a CDN-downloaded extension has
+      # the same dependency). The static exe cannot satisfy them, so the archive ships the two DLLs
+      # from vcpkg's *dynamic* x64-windows triplet inside .lbdb/extension/<ver>/win_amd64/ (already
+      # packaged by `include = [".lbdb"]`), where lcg adds them to the DLL search path before
+      # LOAD EXTENSION. Must run after the extension staging above and before `dist build`.
+      # See ADR-0581.
+      - name: "Windows: restore dynamic OpenSSL (vcpkg) from cache"
+        id: openssl-dynamic-cache
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          key: vcpkg-openssl-x64-windows-${{ steps.vcpkg.outputs.commit }}
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed/x64-windows
+      - name: "Windows: build dynamic OpenSSL (vcpkg) for the extension DLLs"
+        if: runner.os == 'Windows' && steps.openssl-dynamic-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg" install openssl:x64-windows'
+      - name: "Windows: bundle OpenSSL DLLs beside the lbug extensions"
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/stage-openssl-dlls-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/x64-windows" "$(pwd)"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot

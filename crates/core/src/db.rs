@@ -176,6 +176,14 @@ impl Db {
         // ExtensionManager::loadExtension treats it as a USER (not OFFICIAL) extension and
         // dlopen()s the given path directly.
         if let Some(files) = crate::lbug_extension_home::resolve_extension_files()? {
+            // Windows (#581): lbug's extension DLLs import libssl-3-x64.dll/libcrypto-3-x64.dll,
+            // shipped beside them in the bundle; this puts that directory on the DLL search path
+            // (SetDllDirectoryW) before lbug's plain LoadLibraryW. Deliberately process-global —
+            // it also removes the current directory from the search order, which is intended for a
+            // service process, and any later DLL load in lcg inherits it. Race-free only because
+            // Db::open holds OPEN_LOCK here; revisit this call if that lock is ever removed.
+            // A no-op on other platforms.
+            crate::lbug_extension_home::expose_extension_dependencies(&files)?;
             for path in [&files.vector, &files.fts] {
                 // `to_string_lossy()` would silently replace invalid bytes, which could turn a
                 // non-UTF-8 path into a *different*, plausible-looking path that doesn't

@@ -21,7 +21,11 @@
 # HOW
 #
 # Copies the two libraries under the names lbug asks for into a staging directory and prepends
-# that directory to LIB, the MSVC linker's library search path. LIB rather than `RUSTFLAGS=-L`:
+# that directory to LIB, the MSVC linker's library search path. lbug has asked for *different* names
+# across releases: 0.18.1's build.rs emits `dylib=ssl`/`dylib=crypto` (ssl.lib/crypto.lib), while
+# 0.20.4's emits `dylib=libssl`/`dylib=libcrypto` (libssl.lib/libcrypto.lib — found when #572's
+# 0.20.4 pin failed to link on Windows with LNK1181 'libssl.lib'). Both name forms are staged, so
+# the script works across the pin without tracking which lbug release is current. LIB rather than `RUSTFLAGS=-L`:
 # changing RUSTFLAGS invalidates cargo's whole build cache and collides with cargo-dist's own
 # flags, while LIB is read by link.exe alone.
 #
@@ -56,12 +60,15 @@ done
 
 stage="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lcg-openssl-link"
 mkdir -p "$stage"
-cp "$root/lib/libssl.lib" "$stage/ssl.lib"
-cp "$root/lib/libcrypto.lib" "$stage/crypto.lib"
-note "staged ssl.lib and crypto.lib from $root/lib -> $stage"
+for base in ssl crypto; do
+  cp "$root/lib/lib$base.lib" "$stage/$base.lib"      # lbug 0.18.x: dylib=ssl / dylib=crypto
+  cp "$root/lib/lib$base.lib" "$stage/lib$base.lib"   # lbug 0.20.x: dylib=libssl / dylib=libcrypto
+done
+note "staged ssl.lib/libssl.lib and crypto.lib/libcrypto.lib from $root/lib -> $stage"
 
 # Static OpenSSL's Windows system-library dependencies (sockets, certificate store, user32 for
-# its console UI hooks, advapi32 for the registry/crypto provider).
+# its console UI hooks, advapi32 for the registry/crypto provider). lbug 0.20.x's build.rs emits
+# these four itself; the duplicate under 0.20.x is harmless and still needed on 0.18.x — keep it.
 system_libs="ws2_32.lib crypt32.lib user32.lib advapi32.lib"
 
 if compgen -G "$root/bin/libssl-3*.dll" > /dev/null; then
