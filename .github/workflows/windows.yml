@@ -121,19 +121,35 @@ jobs:
       - name: lcg-service unit tests (incl. named-pipe transport)
         run: cargo test -p lcg-service --bin liminis-context-graph
 
-      # Run the e2e from PowerShell with every PATH entry that could supply an OpenSSL DLL removed
-      # (Git for Windows' mingw64\bin and usr\bin ship libssl-3-x64.dll; the image may carry other
-      # OpenSSL installs). Under Git Bash those DLLs are on PATH, which silently satisfied the
-      # extensions' imports and hid the missing bundle DLLs (#581). The first step proves the
-      # filtered PATH cannot resolve them, so a pass means the bundle did.
+      # Run the e2e with a PATH *built from an allowlist*, not filtered from the inherited one. The
+      # inherited runner PATH is actively hostile to this test: several unrelated tools on it ship
+      # their own libssl-3-x64.dll / libcrypto-3-x64.dll, and any of them silently satisfies the lbug
+      # extensions' OpenSSL imports, making the e2e pass without proving the bundled DLLs work (#581).
+      # Seen so far: Git for Windows' mingw64\bin and usr\bin (hid the original bug locally), and
+      # C:\Program Files\MySQL\MySQL Server 8.0\bin on the windows-latest image (caught by the
+      # assertion below on this PR's first CI run). A blocklist of such directories is unbounded,
+      # so the step keeps only what it needs: the Rust toolchain and the Windows system directories.
+      # rustc locates link.exe itself (vswhere/registry), and the earlier clippy/test steps have
+      # already run every build script, so nothing else is required here. The assertion stays as a
+      # second guard: a pass must mean the bundle resolved the DLLs.
       - name: Socket service end-to-end over the named pipe (no OpenSSL DLL on PATH)
         shell: pwsh
         run: |
-          $env:Path = ($env:Path -split ';' | Where-Object { $_ -and $_ -notmatch '\\Git\\(mingw64|usr)\\|OpenSSL|vcpkg' }) -join ';'
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $env:Path = @(
+            (Join-Path $cargoHome 'bin'),
+            "$env:SystemRoot\System32",
+            $env:SystemRoot,
+            "$env:SystemRoot\System32\Wbem",
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0",
+            (Split-Path -Parent (Get-Process -Id $PID).Path)
+          ) -join ';'
+          Write-Host "PATH for this step: $env:Path"
           foreach ($dll in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
             $found = (Get-Command $dll -ErrorAction SilentlyContinue).Source
             if ($found) { throw "$dll is still resolvable on PATH at $found — the e2e would not prove the bundle" }
           }
+          cargo --version
           cargo test -p lcg-service --test socket_service_e2e
 
       - name: Assert the service binary imports no OpenSSL DLL
