@@ -169,6 +169,7 @@ jobs:
             aarch64-apple-darwin) platform=osx_arm64 ;;
             x86_64-unknown-linux-gnu) platform=linux_amd64 ;;
             aarch64-unknown-linux-gnu) platform=linux_arm64 ;;
+            x86_64-pc-windows-msvc) platform=win_amd64 ;;
             *)
               echo "no lbug extension platform mapping for target '${{ join(matrix.targets, '') }}' — update .github/build-setup.yml, .github/workflows/release.yml, and crates/core/src/lbug_extension_home.rs together" >&2
               exit 1
@@ -212,6 +213,35 @@ jobs:
       # `dist build`, only under a plain `cargo build` (#550).
       - name: "Stage @rpath OpenSSL so the binary names no machine-specific path"
         run: "bash scripts/stage-openssl-rpath.sh"
+      # Windows (#581, ADR-0581): OpenSSL is linked *statically* from vcpkg's
+      # x64-windows-static-md triplet, so the archive ships one self-contained .exe with no
+      # OpenSSL DLLs. cargo-dist's `include` is flat across targets, so there is no clean way to
+      # bundle DLLs into the Windows archive alone — and Windows has no package manager that
+      # would deliver OpenSSL CVE fixes to a DLL we shipped anyway, which is ADR-0550's reason
+      # for dynamic linking elsewhere. stage-openssl-windows.sh detects the static install (no
+      # DLLs in <root>/bin), stages ssl.lib/crypto.lib onto LIB (lbug's build.rs asks MSVC for
+      # those names) and exports LINK with the Windows system libraries static OpenSSL needs.
+      # vcpkg ships preinstalled on the Windows runner; the built tree is cached.
+      - name: "Windows: vcpkg commit for the static OpenSSL cache key"
+        id: vcpkg
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "commit=$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: "Windows: restore static OpenSSL (vcpkg) from cache"
+        id: openssl-static-cache
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          key: vcpkg-openssl-x64-windows-static-md-${{ steps.vcpkg.outputs.commit }}
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed/x64-windows-static-md
+      - name: "Windows: build static OpenSSL (vcpkg)"
+        if: runner.os == 'Windows' && steps.openssl-static-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg" install openssl:x64-windows-static-md'
+      - name: "Windows: stage static OpenSSL for the MSVC linker"
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/stage-openssl-windows.sh "$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static-md"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
@@ -257,7 +287,9 @@ jobs:
           # /bin/bash is 3.2.
           found=""
           while IFS= read -r -d '' bin; do
-            found="$found $(basename "$bin")"
+            # Windows binaries are *.exe; compare on the stem so one expected-name list
+            # covers every target.
+            found="$found $(basename "$bin" .exe)"
           done < <(find_bins)
           for expected in liminis-context-graph lcg-eval; do
             case " $found " in

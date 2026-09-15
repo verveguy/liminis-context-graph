@@ -128,6 +128,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0559](0559-bundle-lbug-extensions.md) | Bundle lbug vector/fts extensions so startup never downloads from the CDN | 2026-09-05 |
 | [0575](0575-lazy-connect-for-attached-mcp-stdio.md) | Lazy-Dial the Attached `--connect` Socket by Default, With `--connect-eager` Opt-Out | 2026-09-09 |
 | [0577](0577-strip-wal-embeddings.md) | `knowledge_strip_wal_embeddings` — Two-Pass In-Place Stripping of Pre-0.14 WAL Vectors | 2026-09-09 |
+| [0581](0581-windows-static-openssl.md) | Link OpenSSL Statically on Windows | 2026-09-15 |
 
 ## Historical numbering
 

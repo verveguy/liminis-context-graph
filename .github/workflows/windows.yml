@@ -43,7 +43,8 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: never
-  OPENSSL_TRIPLET: x64-windows
+  # Static, as release builds link it (ADR-0581): what CI tests is what ships.
+  OPENSSL_TRIPLET: x64-windows-static-md
 
 jobs:
   windows:
@@ -58,7 +59,7 @@ jobs:
         with:
           components: clippy
 
-      # vcpkg ships on the runner image; building openssl:x64-windows from source takes several
+      # vcpkg ships on the runner image; building openssl from source takes several
       # minutes, so cache the installed tree keyed on the vcpkg checkout it was built with.
       - name: Get vcpkg commit for cache key
         id: vcpkg
@@ -75,8 +76,8 @@ jobs:
         if: steps.openssl-cache.outputs.cache-hit != 'true'
         run: '"$VCPKG_INSTALLATION_ROOT/vcpkg" install "openssl:$OPENSSL_TRIPLET"'
 
-      # lbug's build.rs asks MSVC for ssl.lib/crypto.lib; stage renamed import libs onto LIB and
-      # put the OpenSSL DLLs on PATH for the test binaries. See the script's header.
+      # lbug's build.rs asks MSVC for ssl.lib/crypto.lib; stage renamed static libs onto LIB and
+      # export LINK with the Windows system libraries static OpenSSL needs. See the script's header.
       - name: Stage OpenSSL for the MSVC linker
         run: |
           echo "OPENSSL_DIR=$VCPKG_INSTALLATION_ROOT\\installed\\$OPENSSL_TRIPLET" >> "$GITHUB_ENV"
@@ -104,3 +105,6 @@ jobs:
 
       - name: Socket service end-to-end over the named pipe
         run: cargo test -p lcg-service --test socket_service_e2e
+
+      - name: Assert the service binary imports no OpenSSL DLL
+        run: bash scripts/assert-openssl-linkage.sh target/debug/liminis-context-graph.exe
