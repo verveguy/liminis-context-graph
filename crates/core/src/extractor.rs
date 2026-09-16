@@ -1313,6 +1313,16 @@ pub struct OaiExtractor {
     transport: ExtractTransport,
     model: String,
     sink: Arc<dyn TelemetrySink>,
+    /// Optional bearer token sent as `Authorization: Bearer <key>` on the HTTP transport only,
+    /// read from `LCG_EXTRACTION_API_KEY`. Lets `--extractor-http` target an authenticated
+    /// OpenAI-compatible proxy (e.g. a corporate LLM gateway). Never applied to UDS.
+    api_key: Option<String>,
+}
+
+fn extraction_api_key_from_env() -> Option<String> {
+    std::env::var("LCG_EXTRACTION_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
 }
 
 impl OaiExtractor {
@@ -1329,6 +1339,7 @@ impl OaiExtractor {
             },
             model: model.into(),
             sink,
+            api_key: extraction_api_key_from_env(),
         }
     }
 
@@ -1346,6 +1357,7 @@ impl OaiExtractor {
             },
             model: model.into(),
             sink,
+            api_key: None,
         }
     }
 
@@ -1353,11 +1365,23 @@ impl OaiExtractor {
     ///
     /// - `LCG_EXTRACTION_URL` (default `http://127.0.0.1:8765/v1/chat/completions`)
     /// - `LCG_EXTRACTION_MODEL` (default `local`)
+    /// - `LCG_EXTRACTION_API_KEY` (optional bearer token for the HTTP transport)
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
         let url = std::env::var("LCG_EXTRACTION_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8765/v1/chat/completions".to_string());
         let model = std::env::var("LCG_EXTRACTION_MODEL").unwrap_or_else(|_| "local".to_string());
         Self::new_http(url, model, sink)
+    }
+
+    /// Sets (or clears) the bearer token explicitly, overriding `LCG_EXTRACTION_API_KEY`.
+    /// Only honoured by the HTTP transport; a UDS extractor ignores it.
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = match &self.transport {
+            ExtractTransport::Http { .. } => api_key.filter(|k| !k.is_empty()),
+            #[cfg(unix)]
+            ExtractTransport::Uds { .. } => None,
+        };
+        self
     }
 
     pub fn model_name(&self) -> &str {
@@ -1390,9 +1414,11 @@ impl OaiExtractor {
         });
         match &self.transport {
             ExtractTransport::Http { client, url } => {
-                let resp = client
-                    .post(url)
-                    .json(&body)
+                let mut req = client.post(url).json(&body);
+                if let Some(key) = &self.api_key {
+                    req = req.bearer_auth(key);
+                }
+                let resp = req
                     .send()
                     .await
                     .map_err(|e| ChatFailure::Transport(Error::from(e)))?;
@@ -3134,6 +3160,110 @@ mod tests {
             }
         });
         (format!("http://{addr}/v1/chat/completions"), handle)
+    }
+
+    /// Like `spawn_stub_http_server`, but also captures the request's raw header
+    /// lines so a test can assert on what the extractor sent (e.g. `Authorization`).
+    async fn spawn_header_capturing_stub_http_server(
+        body: String,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_in = std::sync::Arc::clone(&captured);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    let n = reader.read_line(&mut line).await.unwrap_or(0);
+                    if n == 0 || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    let lower = line.to_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                    captured_in
+                        .lock()
+                        .unwrap()
+                        .push(line.trim_end().to_string());
+                }
+                if content_length > 0 {
+                    let mut buf = vec![0u8; content_length];
+                    reader.read_exact(&mut buf).await.ok();
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                write_half.write_all(response.as_bytes()).await.ok();
+            }
+        });
+        (
+            format!("http://{addr}/v1/chat/completions"),
+            captured,
+            handle,
+        )
+    }
+
+    fn captured_authorization(headers: &[String]) -> Option<String> {
+        headers
+            .iter()
+            .find(|h| h.to_lowercase().starts_with("authorization:"))
+            .map(|h| h["authorization:".len()..].trim().to_string())
+    }
+
+    #[tokio::test]
+    async fn http_extractor_sends_bearer_token_when_api_key_set() {
+        let content =
+            r#"{"entities": [{"name": "Alice", "entity_type": "Person", "summary": "A person"}]}"#;
+        let (url, headers, _server) =
+            spawn_header_capturing_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _)
+            .with_api_key(Some("sekrit-token".to_string()));
+
+        extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+
+        let headers = headers.lock().unwrap();
+        assert_eq!(
+            captured_authorization(&headers).as_deref(),
+            Some("Bearer sekrit-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn http_extractor_sends_no_authorization_header_without_api_key() {
+        let content =
+            r#"{"entities": [{"name": "Alice", "entity_type": "Person", "summary": "A person"}]}"#;
+        let (url, headers, _server) =
+            spawn_header_capturing_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        // Explicit `None` so the assertion holds regardless of the ambient environment.
+        let extractor =
+            OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _).with_api_key(None);
+
+        extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+
+        let headers = headers.lock().unwrap();
+        assert_eq!(captured_authorization(&headers), None);
     }
 
     fn test_extract_options() -> ExtractOptions<'static> {
