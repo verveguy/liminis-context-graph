@@ -106,7 +106,8 @@ for name in vector fts; do
 
   actual="$(shasum -a 256 "$tmp" | awk '{ print $1 }' | tr '[:upper:]' '[:lower:]')"
   if [[ "$actual" != "$pinned" ]]; then
-    version_hint="$(grep -a -o -E '\b0\.[0-9]+\.[0-9]+\b' "$tmp" | sort -uV | tail -1 || true)"
+    # Not anchored to a leading "0." — a future major-version bump must still match.
+    version_hint="$(grep -a -o -E '\b[0-9]+\.[0-9]+\.[0-9]+\b' "$tmp" | sort -uV | tail -1 || true)"
     rm -f "$tmp"
     if [[ -n "$version_hint" ]]; then
       die "sha256 mismatch for $platform/$name: expected $pinned, got $actual (downloaded from $url). Highest embedded version string in the received bytes: $version_hint — informational only, NOT a claim of ABI compatibility or incompatibility with the pinned lbug core. If this is a legitimate upstream republish, verify the new bytes by hand and update $hashes_file; do not simply re-run this script."

@@ -47,7 +47,7 @@ against the pinned lbug core — does not work, for two independent reasons:
    at `"0.20.2"` when read positionally, even though the true 0.20.3 source table contains
    `"0.20.3"`. Reading "where a string cluster ends" produces artifacts, not answers. The only
    reliable read is: scan for every `MAJOR.MINOR.PATCH`-shaped token and take the maximum —
-   `grep -a -o -E '\b0\.[0-9]+\.[0-9]+\b' "$bin" | sort -uV | tail -1`. Verified against official
+   `grep -a -o -E '\b[0-9]+\.[0-9]+\.[0-9]+\b' "$bin" | sort -uV | tail -1`. Verified against official
    CLI binaries for 0.20.0/0.20.2/0.20.3/0.20.4 (each reports its own version), the CDN's
    `v0.20.0/win_amd64` extensions (reports `0.20.2`), and an extension built from the 0.20.4 tag
    (reports `0.20.4`).

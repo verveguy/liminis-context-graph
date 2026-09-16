@@ -23,6 +23,7 @@ on:
       - "Cargo.lock"
       - ".cargo/**"
       - "LBUG_EXTENSION_VERSION"
+      - "LBUG_EXTENSION_HASHES"
       - "scripts/stage-openssl-windows.sh"
       - "scripts/stage-lbug-extensions.sh"
       - ".github/workflows/windows.yml"
