@@ -106,6 +106,11 @@ resolves cleanly, with no special-case detection). But once that directory exist
 inside it is a hard `Error::Config`, not a silent fall-through, so an operator's "offline"
 deployment cannot reach the network unexpectedly because half of a bundle failed to extract.
 
+This directory-existence check cannot verify that staged bytes actually correspond to the
+version their directory is named after — it only checks the directory exists and its files are
+non-empty. [ADR-0593](0593-pin-lbug-extension-bytes.md) closes that gap at the point the bytes
+are staged, by pinning the expected sha256 of each downloaded extension file.
+
 ### `LBUG_EXTENSION_VERSION`: single-file source of truth, not derivable from `lbug::VERSION`
 
 The extension-directory version segment is **not a derivable function of the `lbug` crate's
