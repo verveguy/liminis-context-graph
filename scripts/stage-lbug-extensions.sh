@@ -62,6 +62,20 @@ set -euo pipefail
 die() { echo "stage-lbug-extensions.sh: $*" >&2; exit 1; }
 note() { echo "stage-lbug-extensions.sh: $*" >&2; }
 
+# Neither hash tool is universal across this script's three runner OSes: `sha256sum` (GNU
+# coreutils) ships with Linux and with Git for Windows' bundled MSYS environment, but not with
+# macOS's stock BSD userland; `shasum` (Perl's Digest::SHA) ships with macOS and Linux, but not
+# with Git for Windows' bash. Try `sha256sum` first, fall back to `shasum -a 256`.
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    die "no sha256 tool found on PATH (need sha256sum or shasum)"
+  fi
+}
+
 [[ $# -eq 2 ]] || die "usage: $0 <platform> <dest-dir>"
 platform="$1"
 dest="$2"
@@ -104,7 +118,7 @@ for name in vector fts; do
     die "failed to download $url"
   }
 
-  actual="$(shasum -a 256 "$tmp" | awk '{ print $1 }' | tr '[:upper:]' '[:lower:]')"
+  actual="$(sha256 "$tmp" | tr '[:upper:]' '[:lower:]')"
   if [[ "$actual" != "$pinned" ]]; then
     # Not anchored to a leading "0." — a future major-version bump must still match.
     version_hint="$(grep -a -o -E '\b[0-9]+\.[0-9]+\.[0-9]+\b' "$tmp" | sort -uV | tail -1 || true)"
