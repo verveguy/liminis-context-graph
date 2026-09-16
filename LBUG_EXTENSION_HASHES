@@ -1,0 +1,31 @@
+# Pinned sha256 for the lbug vector/fts extension binaries staged by
+# scripts/stage-lbug-extensions.sh (issue #593, ADR-0593).
+#
+# WHY THIS FILE EXISTS
+#
+# extension.ladybugdb.com publishes extensions at a per-minor path
+# (v<LBUG_EXTENSION_VERSION>/<platform>/<name>/) and overwrites the files at that path on
+# patch releases — LBUG_EXTENSION_VERSION resolves to one shared directory for every 0.20.x
+# core, so the bytes a build picks up depend on *when* it runs, not on anything pinned in this
+# repository. This file pins the exact bytes stage-lbug-extensions.sh must receive; any other
+# bytes fail the build instead of being silently staged. See ADR-0593 for the full design,
+# including why a version-string diagnostic on mismatch is informational only, never a
+# pass/fail signal — version equality is not the same as ABI compatibility.
+#
+# THIS FILE IS UPDATED BY HAND ONLY, after a human re-verifies new CDN bytes are safe to ship
+# (e.g. via loop testing against the pinned core, as documented in issue #593's discussion).
+# stage-lbug-extensions.sh never writes to this file.
+#
+# Format: one entry per line, "<platform> <extension> <sha256>", where <platform> is one of
+# lbug's own platform strings (osx_arm64, linux_amd64, linux_arm64, win_amd64) and <extension>
+# is vector or fts. Values below were computed from the extension binaries actually bundled in
+# the published v0.15.0 release archives (re-hashed from the release assets, not the live CDN).
+
+osx_arm64 vector 83da02ce1b9fa87ebe67baa3df436641002aade89af1698e6a9df3cb4f93239b
+osx_arm64 fts 26982d5f0bc7ec5a1514dc9a812cb1955db153f8b0d985116f0d9ebfe07c05fc
+linux_amd64 vector 30070e072ea33b03f089536644a1f1e259d886c07d0e51bb244b30aaabd8852e
+linux_amd64 fts e5d8c26e1220e293b20a1d0ab36962f7fd9ff45595725cad0bbe81fb9c442810
+linux_arm64 vector 534be4c893508b02140ed40bcd0fc7370d707c84a1b1e7679f0568a59d6a4af8
+linux_arm64 fts d45dc9ab738613501d7eb1ebd03be65044997aecbd0cc63834e000aa59ece69a
+win_amd64 vector 6c90c4be634b02e54dcd6eb5b9bb7ec328e69d6c94e576daa6abc12bc78579f3
+win_amd64 fts cee505b03a2a8f4f3c25a75c22d457b617d1310f013a676554e5afa5d1e8b358
