@@ -10,7 +10,12 @@ name: Windows
 # - lcg-service's unit tests, including the named-pipe transport (owner-only DACL, first-instance
 #   refusal, round trip);
 # - socket_service_e2e: the real binary serving JSON-RPC over the named pipe, discovered via
-#   .lcg/service.endpoint, through health_check -> knowledge_status -> knowledge_close.
+#   .lcg/service.endpoint, through health_check -> knowledge_status -> knowledge_close, AND
+#   (issue #587) that the bundled vector/FTS extension DLLs don't just load but actually work:
+#   inserting rows with literal embeddings, building a vector index and an FTS index over them,
+#   and querying both back for real rows. Loading alone was insufficient — the lbug 0.20.0
+#   win_amd64 extensions loaded fine, then crashed the process on CREATE_VECTOR_INDEX /
+#   CREATE_FTS_INDEX over populated data, and the original e2e never exercised that path.
 #
 # lcg-core's suite also passes on Windows (verified on a real machine for #581) but is not run
 # here yet: it roughly doubles the job time, and it has no Windows-specific code paths.
