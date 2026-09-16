@@ -89,7 +89,7 @@ jobs:
         id: lbug-ext-cache
         uses: actions/cache@v6
         with:
-          key: lbug-extension-bundle-win_amd64-${{ hashFiles('LBUG_EXTENSION_VERSION') }}
+          key: lbug-extension-bundle-win_amd64-${{ hashFiles('LBUG_EXTENSION_VERSION', 'LBUG_EXTENSION_HASHES') }}
           path: lbug-extension-bundle
 
       - name: Stage lbug vector/fts extensions (win_amd64)
