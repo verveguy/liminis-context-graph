@@ -163,7 +163,7 @@ jobs:
         id: lbug-ext-cache
         uses: actions/cache/restore@v6
         with:
-          key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}
+          key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}-${{ hashFiles('LBUG_EXTENSION_HASHES') }}
           path: lbug-extension-bundle
 
       - name: Stage lbug vector/fts extensions (linux_amd64)
@@ -184,7 +184,7 @@ jobs:
         if: steps.lbug-ext-cache.outputs.cache-hit != 'true' && steps.lbug-ext-stage.outcome == 'success'
         uses: actions/cache/save@v6
         with:
-          key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}
+          key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}-${{ hashFiles('LBUG_EXTENSION_HASHES') }}
           path: lbug-extension-bundle
 
       # Short retention, same rationale as the e2e-artifacts/release-build uploads below:
