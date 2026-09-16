@@ -105,23 +105,40 @@ impl Connection {
     }
 }
 
-/// Polls `health_check` on fresh connections until it reports healthy — the documented readiness
-/// signal (docs/ipc-mcp-reference.md#readiness), since the endpoint exists before the DB opens.
+/// Polls `health_check` until it reports healthy — the documented readiness signal
+/// (docs/ipc-mcp-reference.md#readiness), since the endpoint exists before the DB opens.
+///
+/// Reuses a single connection across "connected but not yet healthy" polls instead of opening a
+/// fresh one every iteration: each open spawns `Connection`'s background reader thread, and since
+/// `Connection` has no way to signal that thread to stop, discarding a connection every 200ms
+/// while polling would leak a thread blocked forever in `read_line` (the peer never sees the
+/// socket/pipe fully closed while the reader's cloned handle is still open) for every retry —
+/// hundreds of them over a slow startup. A connection is only replaced when `call` itself reports
+/// the connection as broken; simply reporting "not yet healthy" keeps reusing it.
 fn wait_until_healthy(socket_path: &Path, timeout: Duration) -> Connection {
     let deadline = Instant::now() + timeout;
     let mut last = String::from("never connected");
+    let mut conn: Option<Connection> = None;
     while Instant::now() < deadline {
-        match Connection::open(socket_path) {
-            Ok(mut conn) => match conn.call(1, "health_check", json!({})) {
+        if conn.is_none() {
+            match Connection::open(socket_path) {
+                Ok(c) => conn = Some(c),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        if let Some(active) = conn.as_mut() {
+            match active.call(1, "health_check", json!({})) {
                 Ok(response) => {
                     if response.pointer("/result/healthy") == Some(&Value::Bool(true)) {
-                        return conn;
+                        return conn.take().unwrap();
                     }
                     last = response.to_string();
                 }
-                Err(e) => last = e,
-            },
-            Err(e) => last = e.to_string(),
+                Err(e) => {
+                    last = e;
+                    conn = None;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -156,8 +173,11 @@ fn call_checked(
 /// child, which writes into it) and the guarded child process. `socket_path` is retained for the
 /// Windows-only endpoint-file check.
 struct SpawnedService {
-    _dir: TempDir,
+    // Declaration order is drop order: `child` must be killed (and its handles into `_dir`
+    // released) before `_dir` is recursively deleted, or the delete can hit files the still-running
+    // process has open — a sharing violation on Windows, the platform this PR is hardening.
     child: ChildGuard,
+    _dir: TempDir,
     #[cfg_attr(not(windows), allow(dead_code))]
     socket_path: PathBuf,
 }
