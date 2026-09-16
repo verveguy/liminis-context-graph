@@ -3,3 +3,8 @@
 # and the pinned comparison failed on a trailing `\r` (#581). `-text` turns off end-of-line
 # conversion for them on every platform, so the working tree matches the repository exactly.
 crates/core/tests/fixtures/** -text
+
+# Same failure mode as above (#581), hit again in #593: stage-lbug-extensions.sh's awk-based
+# lookup of a pinned sha256 does not strip \r, so a CRLF-rewritten checkout on Windows would
+# corrupt every pinned hash with a trailing carriage return and fail every comparison.
+LBUG_EXTENSION_HASHES -text

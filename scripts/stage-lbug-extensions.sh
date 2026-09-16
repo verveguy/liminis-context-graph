@@ -107,7 +107,10 @@ for name in vector fts; do
   pinned="$(awk -v p="$platform" -v n="$name" '$1 == p && $2 == n { print $3 }' "$hashes_file")"
   [[ -n "$pinned" ]] ||
     die "no pinned sha256 for platform '$platform' extension '$name' in $hashes_file — add one after verifying the downloaded bytes by hand"
-  pinned="$(printf '%s' "$pinned" | tr '[:upper:]' '[:lower:]')"
+  # Strip a stray \r defensively — belt-and-suspenders alongside the .gitattributes -text rule
+  # that keeps this file LF-only on checkout (see #593 review: an unstripped \r from a
+  # CRLF-rewritten checkout would silently corrupt every pinned hash comparison below).
+  pinned="$(printf '%s' "$pinned" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
 
   note "fetching $url"
   tmp="$(mktemp "$ext_dir/.${file}.XXXXXX")"
