@@ -112,7 +112,7 @@ lbug = "=0.21.0"
 thiserror = "2"
 tempfile = "3"
 regex = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
