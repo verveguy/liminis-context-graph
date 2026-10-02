@@ -125,6 +125,6 @@ http-body-util = "0.1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 futures = "0.3"
 serde_yaml = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 tokio-util = "0.7"
 rmcp = { version = "2.2.0", default-features = false, features = ["server", "transport-io"] }
