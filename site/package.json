@@ -14,7 +14,7 @@
     "links": "node scripts/check-links.mjs"
   },
   "dependencies": {
-    "@astrojs/react": "^4.2.1",
+    "@astrojs/react": "^7.0.0",
     "@astrojs/starlight": "^0.32.2",
     "@liminis/diagrams": "^0.1.5",
     "astro": "^5.5.2",
