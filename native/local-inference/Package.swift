@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v26)],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
-        .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.14"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.4"),
     ],
     targets: [
         .executableTarget(
