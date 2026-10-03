@@ -27,7 +27,7 @@ jobs:
     # fully self-contained — OpenSSL links externally since 0.18.0).
     # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 

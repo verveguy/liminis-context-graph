@@ -55,7 +55,7 @@ jobs:
           echo "number=$num" >> "$GITHUB_OUTPUT"
           echo "base=$base" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Check out the PR head explicitly so the same steps work for both
           # triggers; on workflow_dispatch the default ref is the base branch.

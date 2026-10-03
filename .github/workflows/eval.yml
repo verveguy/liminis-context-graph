@@ -24,7 +24,7 @@ jobs:
     env:
       LBUG_BUILD_FROM_SOURCE: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # No step in this job pushes or otherwise writes back to the repo, so don't
           # leave the checkout token persisted in git config for later steps to find.

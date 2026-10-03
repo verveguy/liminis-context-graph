@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout docs source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.determine.outputs.ref }}
           path: docs-src
@@ -101,11 +101,11 @@ jobs:
       # Version given explicitly. The action otherwise reads `packageManager`
       # from a package.json at the repository root, and this is a Rust workspace
       # — there is no root package.json for it to read, so it fails outright.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.32.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'pnpm'
