@@ -37,6 +37,7 @@ fn round_trip_entity_and_episodic() {
 
     // 4. Insert 1 Episodic row.
     conn.insert_episodic(&EpisodicRow {
+        ingested_at: String::new(),
         uuid: "episodic-0".to_string(),
         name: "Episode 0".to_string(),
         group_id: "test-group".to_string(),

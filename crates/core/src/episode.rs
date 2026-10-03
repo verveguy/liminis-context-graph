@@ -960,6 +960,7 @@ pub async fn add_episode(
         let summary_embedding = summary_embeddings[i].clone();
         DedupDecision::Insert {
             row: Box::new(EntityRow {
+                ingested_at: String::new(),
                 uuid: uuid::Uuid::new_v4().to_string(),
                 name: extracted.name.clone(),
                 group_id: gid_owned.clone(),
@@ -1377,6 +1378,7 @@ pub async fn add_episode(
                 continue;
             }
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: uuid::Uuid::new_v4().to_string(),
                 name: format!("{} → {}", edge.source_name, edge.target_name),
                 source_node_uuid: src_uuid,
@@ -1410,6 +1412,7 @@ pub async fn add_episode(
 
         // Insert episodic node
         conn.insert_episodic(&EpisodicRow {
+            ingested_at: String::new(),
             uuid: ep_uuid.clone(),
             name: name_owned,
             group_id: gid_owned.clone(),

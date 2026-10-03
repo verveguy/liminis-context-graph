@@ -66,6 +66,7 @@ fn timestamp_shaped_string_columns_stored_verbatim() {
     })
     .unwrap();
     conn.insert_episodic(&EpisodicRow {
+        ingested_at: String::new(),
         uuid: "ep1".into(),
         name: "chunk".into(),
         group_id: "g".into(),

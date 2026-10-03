@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Upgrading
+
+- **Existing graphs get an `ingested_at` backfill on first start** (#673, ADR-0673): from the `ts` of
+  the WAL entry that created each record where the WAL still has one, otherwise from `created_at`.
+  The `created_at` fallback is approximate (for pre-existing records it was the event time).
+
+### Added
+
+- **`ingested_at` on episodes, entities and edges** (#673, ADR-0673): the service-clock time the
+  record was first written, kept separately from the caller-supplied event time (`reference_time` →
+  `valid_at` / `created_at`). Never caller-supplied, set once, preserved across WAL rebuild, recovery,
+  checkpoint restore and dump compaction. Returned on every episode/entity/relationship read and
+  accepted in the `fields` projection of `knowledge_get_episodes` and `knowledge_list_entities`.
+  Additive only; `created_at` / `valid_at` and all ordering are unchanged.
+
 ## [0.16.4] - 2026-10-02
 
 Full detail: [docs/releases/0.16.4.md](docs/releases/0.16.4.md).

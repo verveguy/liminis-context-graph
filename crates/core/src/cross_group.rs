@@ -262,6 +262,7 @@ pub fn create_cross_group_edge(
     let attributes = pointer::write_pointers("{}", &pointers);
 
     let edge = RelatesToEdge {
+        ingested_at: String::new(),
         uuid: Uuid::new_v4().to_string(),
         name: params.name,
         source_node_uuid: source_uuid.unwrap_or_else(|| UNRESOLVED.to_string()),

@@ -430,6 +430,8 @@ pub fn run_full_recovery_sequence(
         // ever builds entity_lookup_key_idx over the column (issue #221 FR-006). Persists the
         // outcome to SchemaState too, not just the in-process flag.
         schema::backfill_entity_lookup_keys_and_record_status(&conn);
+        // `ingested_at` (issue #673): replayed legacy rows have it NULL; fill from the WAL tree.
+        schema::backfill_ingested_at_and_record_status(&conn, &schema::group_wal_dirs(wal_root));
         conn.build_indices_and_constraints()?;
         // Persist the applied-WAL-seq position(s) (issue #353) — a deliberate extension beyond
         // FR-004's literal text (which names knowledge_rebuild_from_wal), since this autonomous

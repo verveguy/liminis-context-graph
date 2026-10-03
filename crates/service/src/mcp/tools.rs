@@ -245,7 +245,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "cursor": cursor_prop(),
                         "fields": fields_prop(
-                            "uuid, name, group_id, created_at, source, source_description, \
+                            "uuid, name, group_id, created_at, ingested_at, source, source_description, \
                              content, valid_at, entity_edges, attributes"
                         )
                     }
@@ -353,7 +353,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "cursor": cursor_prop(),
                         "fields": fields_prop(
-                            "uuid, name, group_id, labels, kind, created_at, summary, \
+                            "uuid, name, group_id, labels, kind, created_at, ingested_at, summary, \
                              attributes, episode_uuids, source_descriptions"
                         )
                     }

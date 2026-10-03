@@ -888,6 +888,7 @@ fn insert_test_edge(
 ) {
     let conn = db.connect().unwrap();
     conn.insert_relates_to_edge(&RelatesToEdge {
+        ingested_at: String::new(),
         uuid: uuid.to_string(),
         name: fact.to_string(),
         source_node_uuid: source.to_string(),
@@ -3584,6 +3585,7 @@ async fn test_relates_to_edge_timestamp_type() {
         })
         .unwrap();
         conn.insert_relates_to_edge(&RelatesToEdge {
+            ingested_at: String::new(),
             uuid: "irt-edge-001".to_string(),
             name: "relates to".to_string(),
             source_node_uuid: "irt-src-001".to_string(),
@@ -3786,6 +3788,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
         // These match is_noise_edge() and would have been deleted before ADR-0033.
         for i in 0..10usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: format!("cnde-edge-{i:03}"),
                 name: "BRETT → RAJI".to_string(),
                 source_node_uuid: "cnde-src-001".to_string(),
@@ -3977,6 +3980,7 @@ async fn parity_backfill_dry_run_counts() {
         // 3 edges with empty relation_type
         for i in 0..3usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: format!("bfdr-empty-{i:03}"),
                 name: "Alice → Bob".to_string(),
                 source_node_uuid: "bfdr-src-001".to_string(),
@@ -3997,6 +4001,7 @@ async fn parity_backfill_dry_run_counts() {
         // 2 edges with populated relation_type
         for i in 0..2usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: format!("bfdr-pop-{i:03}"),
                 name: "Alice → Bob".to_string(),
                 source_node_uuid: "bfdr-src-001".to_string(),
@@ -4077,6 +4082,7 @@ async fn parity_backfill_live_fills_empty() {
         .unwrap();
         for i in 0..3usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: format!("bflv-empty-{i:03}"),
                 name: "Alice → Bob".to_string(),
                 source_node_uuid: "bflv-src-001".to_string(),
@@ -4096,6 +4102,7 @@ async fn parity_backfill_live_fills_empty() {
         }
         for i in 0..2usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: format!("bflv-pop-{i:03}"),
                 name: "Alice → Bob".to_string(),
                 source_node_uuid: "bflv-src-001".to_string(),
@@ -4200,6 +4207,7 @@ async fn parity_backfill_idempotent() {
         .unwrap();
         for i in 0..3usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: format!("bfid-empty-{i:03}"),
                 name: "Alice → Bob".to_string(),
                 source_node_uuid: "bfid-src-001".to_string(),
@@ -7187,6 +7195,7 @@ async fn parity_reload_ontology_shape_and_errors() {
 fn insert_test_episode(db: &Arc<Db>, uuid: &str, name: &str, group: &str, created_at: &str) {
     let conn = db.connect().unwrap();
     conn.insert_episodic(&lcg_core::EpisodicRow {
+        ingested_at: String::new(),
         uuid: uuid.to_string(),
         name: name.to_string(),
         group_id: group.to_string(),

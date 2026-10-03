@@ -1057,6 +1057,52 @@ before relying on `[]` to mean "nothing" — on the other six it doesn't.
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
 
+### Time: event time vs ingest time (`reference_time`, `ingested_at`)
+
+The graph keeps two separately stored clocks, so a record can be both *old in the world* and
+*new to the graph* — a months-old conversation ingested today, or a document chunk dated by its
+content rather than its file mtime.
+
+| Clock | Key | Set by | Meaning |
+|---|---|---|---|
+| **Event time** | `reference_time` (request) → `valid_at` / `created_at` (stored) | the caller; defaults to *now* | When the content happened. `knowledge_process_chunk` validates it as RFC-3339 and writes it to the episode's `created_at` and `valid_at` and to the `created_at` of the entities and edges it extracts; time-ordered reads (episode ordering, paging cursors) key on it. |
+| **Ingest time** | `ingested_at` (response only) | the service clock — **never caller-supplied** | When this service first wrote the record. |
+
+`ingested_at` is on episodes, entities and edges, in the same timestamp format and timezone
+convention as `created_at` (`YYYY-MM-DD HH:MM:SS` on reads). It is an additive key: it appears on
+every read that returns these records (`knowledge_get_episodes`; `find_entities`,
+`resolve_entity`, `list_entities`, `get_nodes_by_group`, `get_entities_by_source`,
+`get_entity_neighbors`; `find_relationships`, `list_relationships`, `get_edges_by_group`,
+`get_edges_by_uuids`) and is accepted in the `fields` projection of `get_episodes` and
+`list_entities`. Any `ingested_at` passed in a request is ignored.
+
+- **First write wins.** The value is set once. A later episode that matches or updates an existing
+  entity or edge, `knowledge_merge_entities` (the surviving entity keeps its own value), and
+  re-asserting an existing entity or edge do not change it. A record re-created under a new uuid by
+  a correction (`same_as`, endpoint rewrite) carries the original edge's `ingested_at`: the graph
+  learned that fact when it was first written.
+- **Direct assertions** (`assert_entity`, `assert_relationship`) get the service clock at the call,
+  independent of any `valid_at` supplied.
+- **Replay never restamps.** `knowledge_rebuild_from_wal`, WAL-tail and startup recovery,
+  checkpoint restore and `knowledge_dump_wal` compaction all carry the recorded value through.
+- `created_at` / `valid_at` mean exactly what they did before. (Edge reads still leave `created_at`
+  empty, as before; only `ingested_at` was added.)
+
+**Upgrading an existing graph.** Records written before this feature have no stored ingest time, so
+on the first start of an upgraded service each one is backfilled once, from the best available
+signal, in this order:
+
+1. the `ts` of the WAL entry that created the record (the first native `CREATE` line for its uuid
+   under the group WAL directories) — a true ingest time;
+2. otherwise the record's own `created_at`.
+
+Signal 2 is **approximate**: for a record written before this feature, `created_at` was the
+event time, so a backfilled value can predate the real ingest. It is used where the WAL no longer
+holds a creating line — typically after `knowledge_dump_wal` compaction (a dumped line's `ts` is
+the compaction time, which says nothing about when the record was learned, so it is never used) or
+after WAL files were pruned. The backfill is idempotent and never rewrites a record that already
+has an ingest time. See [ADR-0673](adr/0673-ingest-time-separate-from-event-time.md).
+
 ### Bulk reads: group scope, paging, projection, prefix (issue #667)
 
 `knowledge_get_episodes` and `knowledge_list_entities` are the two bulk reads, and a large graph
@@ -1068,7 +1114,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
 | `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
-| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, source, source_description, content, valid_at, entity_edges, attributes`. Entities: `uuid, name, group_id, labels, kind, created_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
@@ -1158,6 +1204,10 @@ omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `li
 - **Same never-re-embed-on-update caveat as `knowledge_assert_entity`** (ADR-0379 Decision 6): a
   re-assert that changes `fact` updates the stored `fact` text but leaves `fact_embedding`
   reflecting the prior text until the edge is deleted and recreated.
+
+- **Both tools stamp `ingested_at` with the service clock** at the moment a record is created,
+  regardless of any `valid_at` supplied; see
+  [Time: event time vs ingest time](#time-event-time-vs-ingest-time-reference_time-ingested_at).
 
 See [ADR-0379](adr/0379-direct-assertion-conventions.md) for the full rationale behind these
 upsert and embedding decisions.
@@ -4352,6 +4402,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
 | [0666](0666-exact-graph-match-and-uuid-self-loop-guard.md) | Exact Graph Match Before Salvage, UUID-Level Self-Loop Guard, Short-Code Veto | 2026-10-02 |
 | [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
+| [0673](0673-ingest-time-separate-from-event-time.md) | Ingest Time Is Stored Separately From Event Time (`ingested_at`) | 2026-10-03 |
 
 ## Historical numbering
 

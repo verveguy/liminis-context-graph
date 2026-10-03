@@ -818,6 +818,13 @@ async fn bootstrap_app_state(
             {
                 let conn = db.connect()?;
                 conn.init_schema(embedding_dim)?;
+                // Upgrade backfill of `ingested_at` (issue #673) for a graph that predates the
+                // column: needs the WAL tree for its preferred signal, which `migrate()` lacks.
+                // One point lookup once marked complete; non-fatal.
+                lcg_core::schema::ensure_ingested_at_backfill(
+                    &conn,
+                    &lcg_core::schema::group_wal_dirs(&startup_wal_root),
+                );
                 // Eager build (FR-001): build HNSW/FTS indices immediately after schema init,
                 // before the socket accepts any request, so ingest never has to discover a
                 // missing entity_name_embedding_idx mid-chunk (#208). Idempotent/cheap when

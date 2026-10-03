@@ -49,6 +49,7 @@ fn make_edge_in_group(
     group_id: &str,
 ) -> RelatesToEdge {
     RelatesToEdge {
+        ingested_at: String::new(),
         uuid: Uuid::new_v4().to_string(),
         name: name.to_string(),
         source_node_uuid: src.to_string(),
@@ -949,6 +950,7 @@ fn test_merge_with_timestamp_edges() {
         .unwrap();
         // Edge with explicit RFC-3339 valid_at — stored as TIMESTAMP, read back as space-format
         let edge = RelatesToEdge {
+            ingested_at: String::new(),
             uuid: Uuid::new_v4().to_string(),
             name: format!("knows_{i}"),
             source_node_uuid: uuid.clone(),

@@ -338,6 +338,12 @@ impl Db {
             // column (issue #221 FR-006). Persists the outcome to SchemaState too, not just the
             // in-process flag — see backfill_entity_lookup_keys_and_record_status's doc comment.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): legacy WAL lines never mention it, so replay leaves it
+            // NULL — fill from the WAL's own creating-line timestamps, else `created_at`.
+            crate::schema::backfill_ingested_at_and_record_status(
+                &conn,
+                &[wal_dir_path.to_path_buf()],
+            );
             // Persist the applied-WAL-seq position (issue #353, FR-004) at the precise value
             // the replay just computed — a fresh rebuild is exactly as authoritative as
             // knowledge_rebuild_from_wal's own post-replay write. Non-fatal: a missed write
@@ -378,6 +384,8 @@ impl Db {
             // (no WAL to replay either) with no schema at all.
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Upgrade backfill of `ingested_at` (issue #673); O(1) once marked complete.
+            crate::schema::ensure_ingested_at_backfill(&conn, &[wal_dir_path.to_path_buf()]);
             // Carry a pre-378 database's WalPosition {id: 'singleton'} row forward to the
             // default group's own row (issue #378 FR-001/FR-009) before the backfill check below
             // decides whether a position is already known. No-op on a fresh DB (no legacy row)
@@ -757,11 +765,13 @@ impl<'db> Conn<'db> {
             row.summary_embedding.clone()
         };
         let lookup_key = compute_lookup_key(&row.group_id, &kind, &row.name);
+        let ingested_at = ingested_at_or_now(&row.ingested_at);
         self.exec_params(
             "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
              labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
              summary: $summary, attributes: $attributes, \
-             summary_embedding: $summary_embedding, kind: $kind, lookup_key: $lookup_key})",
+             summary_embedding: $summary_embedding, kind: $kind, lookup_key: $lookup_key, \
+             ingested_at: $ingested_at})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -774,6 +784,7 @@ impl<'db> Conn<'db> {
                 "summary_embedding": summary_embedding,
                 "kind": kind,
                 "lookup_key": lookup_key,
+                "ingested_at": ingested_at,
             }),
         )?;
         self.register_kind(&kind);
@@ -785,7 +796,7 @@ impl<'db> Conn<'db> {
             "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, source: $source, source_description: $source_description, \
              content: $content, content_embedding: $content_embedding, valid_at: $valid_at, \
-             entity_edges: $entity_edges, attributes: $attributes})",
+             entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -798,6 +809,7 @@ impl<'db> Conn<'db> {
                 "valid_at": row.valid_at,
                 "entity_edges": row.entity_edges,
                 "attributes": row.attributes,
+                "ingested_at": ingested_at_or_now(&row.ingested_at),
             }),
         )
     }
@@ -812,7 +824,7 @@ impl<'db> Conn<'db> {
             "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
              valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
-             relation_type: $relation_type})",
+             relation_type: $relation_type, ingested_at: $ingested_at})",
             serde_json::json!({
                 "uuid": edge.uuid,
                 "name": edge.name,
@@ -824,6 +836,7 @@ impl<'db> Conn<'db> {
                 "invalid_at": edge.invalid_at,
                 "attributes": edge.attributes,
                 "relation_type": edge.relation_type,
+                "ingested_at": ingested_at_or_now(&edge.ingested_at),
             }),
         )?;
 
@@ -881,7 +894,7 @@ impl<'db> Conn<'db> {
             "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
              valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
-             relation_type: $relation_type})",
+             relation_type: $relation_type, ingested_at: $ingested_at})",
             serde_json::json!({
                 "uuid": edge.uuid,
                 "name": edge.name,
@@ -893,6 +906,7 @@ impl<'db> Conn<'db> {
                 "invalid_at": edge.invalid_at,
                 "attributes": edge.attributes,
                 "relation_type": edge.relation_type,
+                "ingested_at": ingested_at_or_now(&edge.ingested_at),
             }),
         )?;
 
@@ -1240,7 +1254,8 @@ impl<'db> Conn<'db> {
         let cypher = format!(
             "MATCH (ep:Episodic) {where_clause}\
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
-             ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes \
+             ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
+             ep.ingested_at \
              ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
         );
         let result = self.query_params(&cypher, params)?;
@@ -1259,6 +1274,7 @@ impl<'db> Conn<'db> {
                     valid_at: value_as_timestamp_str(&row[7]),
                     entity_edges: value_as_str_list(&row[8]),
                     attributes: value_as_string(&row[9]),
+                    ingested_at: value_as_timestamp_str(&row[10]),
                     ..Default::default()
                 },
                 created_us,
@@ -1539,13 +1555,13 @@ impl<'db> Conn<'db> {
             Some(gids) => (
                 "MATCH (e:Entity) WHERE e.group_id IN $gids \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes, e.kind",
+                 e.summary, e.attributes, e.kind, e.ingested_at",
                 serde_json::json!({ "gids": gids }),
             ),
             None => (
                 "MATCH (e:Entity) \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes, e.kind",
+                 e.summary, e.attributes, e.kind, e.ingested_at",
                 serde_json::json!({}),
             ),
         };
@@ -1561,6 +1577,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -1578,13 +1595,13 @@ impl<'db> Conn<'db> {
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
                 serde_json::json!({ "gids": gids }),
             ),
             None => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
                 serde_json::json!({}),
             ),
         };
@@ -1600,7 +1617,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid IN $uuids \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuids": uuids }),
         )
     }
@@ -1624,6 +1641,7 @@ impl<'db> Conn<'db> {
                 invalid_at: value_as_optional_timestamp_str(&row[7]),
                 attributes: value_as_string(&row[8]),
                 relation_type: value_as_optional_string(&row[9]),
+                ingested_at: value_as_timestamp_str(&row[10]),
                 ..Default::default()
             });
         }
@@ -1925,7 +1943,7 @@ impl<'db> Conn<'db> {
         let cypher = format!(
             "MATCH (e:Entity) {where_clause}\
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes, e.kind ORDER BY e.uuid DESC LIMIT $limit"
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid DESC LIMIT $limit"
         );
         let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
         if group_pred.is_some() {
@@ -1952,6 +1970,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -1969,13 +1988,13 @@ impl<'db> Conn<'db> {
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit",
                 serde_json::json!({ "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit",
                 serde_json::json!({ "limit": limit as i64 }),
             ),
         };
@@ -2008,13 +2027,13 @@ impl<'db> Conn<'db> {
             "MATCH (c:Entity {{uuid: $uuid}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, c.uuid, n.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit"
         );
         let in_sql = format!(
             "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: $uuid}}) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, n.uuid, c.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit"
         );
 
         let mut edges = self.collect_relates_to_edges(&out_sql, mk_params())?;
@@ -2053,14 +2072,14 @@ impl<'db> Conn<'db> {
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
                  WHERE ep.source_description CONTAINS $src AND e.group_id IN $gids \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes, e.kind LIMIT $limit",
+                 e.summary, e.attributes, e.kind, e.ingested_at LIMIT $limit",
                 serde_json::json!({ "src": source, "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
                  WHERE ep.source_description CONTAINS $src \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes, e.kind LIMIT $limit",
+                 e.summary, e.attributes, e.kind, e.ingested_at LIMIT $limit",
                 serde_json::json!({ "src": source, "limit": limit as i64 }),
             ),
         };
@@ -2076,6 +2095,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -2163,7 +2183,7 @@ impl<'db> Conn<'db> {
             // `get_entity_embeddings_by_uuids_kind`. A NULL kind is a default-kind row.
             "MATCH (e:Entity) WHERE e.group_id = $gid AND (e.kind = $kind OR ((e.kind IS NULL OR e.kind = '') AND $kind = 'Entity')) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes, e.kind",
+             e.name_embedding, e.summary, e.attributes, e.kind, e.ingested_at",
             serde_json::json!({ "gid": group_id, "kind": kind }),
         )?;
         let mut ranked: Vec<(f32, EntityRow)> = Vec::new();
@@ -2187,6 +2207,7 @@ impl<'db> Conn<'db> {
                         summary: value_as_string(&row[6]),
                         attributes: value_as_string(&row[7]),
                         kind: value_as_kind(&row[8]),
+                        ingested_at: value_as_timestamp_str(&row[9]),
                         episode_uuids: vec![],
                         source_descriptions: vec![],
                         ..Default::default()
@@ -2410,7 +2431,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes, e.kind LIMIT 1",
+             e.summary, e.attributes, e.kind, e.ingested_at LIMIT 1",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         if let Some(row) = rows.into_iter().next() {
@@ -2423,6 +2444,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             }))
         } else {
@@ -2463,7 +2485,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.lookup_key = $key \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes, e.kind \
+             e.name_embedding, e.summary, e.attributes, e.kind, e.ingested_at \
              ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
             serde_json::json!({ "key": key }),
         )?;
@@ -2477,6 +2499,7 @@ impl<'db> Conn<'db> {
             summary: value_as_string(&row[6]),
             attributes: value_as_string(&row[7]),
             kind: value_as_kind(&row[8]),
+            ingested_at: value_as_timestamp_str(&row[9]),
             episode_uuids: vec![],
             source_descriptions: vec![],
             ..Default::default()
@@ -2874,7 +2897,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity {uuid: $uuid}) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes, e.kind",
+             e.name_embedding, e.summary, e.attributes, e.kind, e.ingested_at",
             serde_json::json!({ "uuid": uuid }),
         )?;
         if let Some(row) = rows.into_iter().next() {
@@ -2888,6 +2911,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[6]),
                 attributes: value_as_string(&row[7]),
                 kind: value_as_kind(&row[8]),
+                ingested_at: value_as_timestamp_str(&row[9]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
                 ..Default::default()
@@ -2905,7 +2929,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.uuid IN $uuids \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes, e.kind",
+             e.summary, e.attributes, e.kind, e.ingested_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         let mut rows = Vec::new();
@@ -2919,6 +2943,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -2941,7 +2966,8 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes, e.kind ORDER BY e.created_at ASC, e.uuid ASC",
+             e.summary, e.attributes, e.kind, e.ingested_at \
+             ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         let mut result = Vec::new();
@@ -2959,6 +2985,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: row_kind,
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -3033,7 +3060,7 @@ impl<'db> Conn<'db> {
              OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
              OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
-             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         let mut rows = Vec::new();
@@ -3049,6 +3076,7 @@ impl<'db> Conn<'db> {
                 invalid_at: value_as_optional_timestamp_str(&row[7]),
                 attributes: value_as_string(&row[8]),
                 relation_type: value_as_optional_string(&row[9]),
+                ingested_at: value_as_timestamp_str(&row[10]),
                 ..Default::default()
             });
         }
@@ -3306,14 +3334,14 @@ impl<'db> Conn<'db> {
         let mut edges = self.collect_full_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
         // Incoming edges (entity is target)
         edges.extend(self.collect_full_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?);
         Ok(edges)
@@ -3340,6 +3368,7 @@ impl<'db> Conn<'db> {
                 fact_embedding: value_as_float_array(&row[9]),
                 created_at: value_as_timestamp_str(&row[10]),
                 relation_type: value_as_optional_string(&row[11]),
+                ingested_at: value_as_timestamp_str(&row[12]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
             });
@@ -3392,7 +3421,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid = $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": uuid }),
         )?;
         Ok(rows.pop())
@@ -3403,13 +3432,13 @@ impl<'db> Conn<'db> {
         let mut edges = self.collect_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
         edges.extend(self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?);
         Ok(edges)
@@ -3534,7 +3563,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) = 1 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes, e.kind ORDER BY e.uuid SKIP $offset LIMIT $limit",
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid SKIP $offset LIMIT $limit",
             serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
         )?;
         let mut rows = Vec::new();
@@ -3548,6 +3577,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -3567,7 +3597,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) >= 2 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes, e.kind ORDER BY e.uuid SKIP $offset LIMIT $limit",
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid SKIP $offset LIMIT $limit",
             serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
         )?;
         let mut rows = Vec::new();
@@ -3581,6 +3611,7 @@ impl<'db> Conn<'db> {
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
                 kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -3608,7 +3639,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3616,7 +3647,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3625,7 +3656,7 @@ impl<'db> Conn<'db> {
 
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
-    ///            content_embedding, valid_at, entity_edges, attributes]
+    ///            content_embedding, valid_at, entity_edges, attributes, ingested_at]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -3637,7 +3668,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:Episodic) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
-                 n.attributes \
+                 n.attributes, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3646,7 +3677,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:Episodic) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
-                 n.attributes \
+                 n.attributes, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3655,7 +3686,7 @@ impl<'db> Conn<'db> {
 
     /// Page of RelatesToNode_ rows for dump.
     /// Columns: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
-    ///            expired_at, valid_at, invalid_at, attributes, relation_type]
+    ///            expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at]
     pub(crate) fn dump_relatos_page(
         &self,
         group_id: Option<&str>,
@@ -3667,7 +3698,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:RelatesToNode_) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
                  n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
-                 n.attributes, n.relation_type \
+                 n.attributes, n.relation_type, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3676,7 +3707,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:RelatesToNode_) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
                  n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
-                 n.attributes, n.relation_type \
+                 n.attributes, n.relation_type, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3975,7 +4006,13 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// `timestamp($new_created_at)` Cypher wrapper. This is intentional — the value arrives as a
 /// space-format string from `value_as_timestamp_str` and the wrapper handles coercion. Do NOT add
 /// `new_created_at` to this list; doing so would double-apply coercion and break the path.
-const TIMESTAMP_PARAM_NAMES: &[&str] = &["created_at", "valid_at", "invalid_at", "expired_at"];
+const TIMESTAMP_PARAM_NAMES: &[&str] = &[
+    "created_at",
+    "valid_at",
+    "invalid_at",
+    "expired_at",
+    "ingested_at",
+];
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
 /// known timestamp-column param names (see `TIMESTAMP_PARAM_NAMES`).
@@ -4012,6 +4049,21 @@ fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
         return Some(pdt.assume_utc());
     }
     None
+}
+
+/// Stamps a record's ingest time (issue #673, ADR-0673): the service clock at the moment of the
+/// first write, in the WAL `ts` format. A non-empty `existing` is kept as-is — that is only ever
+/// a value the service itself produced earlier (a corrections edge copy carrying the original
+/// edge's ingest time), never a request parameter: no handler maps a request key onto
+/// `ingested_at`, so a caller cannot influence the stored value (FR-002).
+pub(crate) fn ingested_at_or_now(existing: &str) -> String {
+    if existing.is_empty() {
+        chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
+            .to_string()
+    } else {
+        existing.to_string()
+    }
 }
 
 /// Validates and normalizes a caller-supplied `valid_at` timestamp (RFC-3339 or lbug's

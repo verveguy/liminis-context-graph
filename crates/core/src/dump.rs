@@ -27,7 +27,8 @@ const ENTITY_CYPHER: &str = "\
     SET n.name = $name, n.group_id = $group_id, n.labels = $labels, \
     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
     n.summary = $summary, n.attributes = $attributes, \
-    n.summary_embedding = $summary_embedding, n.kind = $kind";
+    n.summary_embedding = $summary_embedding, n.kind = $kind, \
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END";
 
 const EPISODIC_CYPHER: &str = "\
     MERGE (n:Episodic {uuid: $uuid}) \
@@ -36,7 +37,8 @@ const EPISODIC_CYPHER: &str = "\
     n.source_description = $source_description, n.content = $content, \
     n.content_embedding = $content_embedding, \
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
-    n.entity_edges = $entity_edges, n.attributes = $attributes";
+    n.entity_edges = $entity_edges, n.attributes = $attributes, \
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END";
 
 const RELATO_CYPHER: &str = "\
     MERGE (n:RelatesToNode_ {uuid: $uuid}) \
@@ -46,7 +48,8 @@ const RELATO_CYPHER: &str = "\
     n.expired_at = CASE WHEN $expired_at IS NULL THEN NULL ELSE timestamp($expired_at) END, \
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
     n.invalid_at = CASE WHEN $invalid_at IS NULL THEN NULL ELSE timestamp($invalid_at) END, \
-    n.attributes = $attributes, n.relation_type = $relation_type";
+    n.attributes = $attributes, n.relation_type = $relation_type, \
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END";
 
 const COMMUNITY_CYPHER: &str = "\
     MERGE (n:Community {uuid: $uuid}) \
@@ -151,7 +154,7 @@ fn dump_entity_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, labels, created_at, name_embedding, summary,
-                    // attributes, summary_embedding, kind]
+                    // attributes, summary_embedding, kind, ingested_at]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -174,6 +177,7 @@ fn dump_entity_nodes(
                     // every entity to the default kind. `lookup_key` is deliberately not dumped
                     // (derived — the post-replay backfill recomputes it from group_id/kind/name).
                     let kind = crate::db::value_as_kind(&row[9]);
+                    let ingested_at = dump_ingested_at_json(&row[10], &created_at);
                     let summary_embedding = if summary_embedding.is_empty() {
                         vec![0.0f32; embedding.len()]
                     } else {
@@ -190,6 +194,7 @@ fn dump_entity_nodes(
                         "attributes": attributes,
                         "summary_embedding": float_slice_to_json(&summary_embedding),
                         "kind": kind,
+                        "ingested_at": ingested_at,
                     });
                     w.log_mutation(ENTITY_CYPHER, params, "")?;
                 }
@@ -219,7 +224,7 @@ fn dump_episodic_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
-                    //         content, content_embedding, valid_at, entity_edges, attributes]
+                    //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -231,6 +236,7 @@ fn dump_episodic_nodes(
                     let valid_at = dump_opt_ts_json(&row[8]);
                     let entity_edges = value_as_str_list(&row[9]);
                     let attributes = value_as_string(&row[10]);
+                    let ingested_at = dump_ingested_at_json(&row[11], &created_at);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -243,6 +249,7 @@ fn dump_episodic_nodes(
                         "valid_at": valid_at,
                         "entity_edges": entity_edges,
                         "attributes": attributes,
+                        "ingested_at": ingested_at,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }
@@ -272,7 +279,7 @@ fn dump_relato_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
-                    //         expired_at, valid_at, invalid_at, attributes, relation_type]
+                    //         expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -285,6 +292,7 @@ fn dump_relato_nodes(
                     let invalid_at = dump_opt_ts_json(&row[9]);
                     let attributes = value_as_string(&row[10]);
                     let relation_type = value_as_string(&row[11]);
+                    let ingested_at = dump_ingested_at_json(&row[12], &created_at);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -298,6 +306,7 @@ fn dump_relato_nodes(
                         "invalid_at": invalid_at,
                         "attributes": attributes,
                         "relation_type": relation_type,
+                        "ingested_at": ingested_at,
                     });
                     w.log_mutation(RELATO_CYPHER, params, "")?;
                 }
@@ -626,6 +635,19 @@ fn dump_ts_str(v: &lbug::Value) -> String {
 fn dump_opt_ts_json(v: &lbug::Value) -> serde_json::Value {
     match v {
         lbug::Value::Null(_) => serde_json::Value::Null,
+        other => serde_json::Value::String(dump_ts_str(other)),
+    }
+}
+
+/// The `ingested_at` param for a dumped Entity/Episodic/RelatesToNode_ row (issue #673). The
+/// stored value is carried through unchanged — a dump must not restamp it with the compaction
+/// time. A row that still has no ingest time (a failed or skipped backfill) falls back to its
+/// `created_at`, the same last-resort signal the upgrade backfill uses (FR-007), rather than
+/// dumping NULL; JSON null only if even that is empty.
+fn dump_ingested_at_json(v: &lbug::Value, created_at: &str) -> serde_json::Value {
+    match v {
+        lbug::Value::Null(_) if created_at.is_empty() => serde_json::Value::Null,
+        lbug::Value::Null(_) => serde_json::Value::String(created_at.to_string()),
         other => serde_json::Value::String(dump_ts_str(other)),
     }
 }

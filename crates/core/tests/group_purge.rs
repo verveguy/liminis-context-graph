@@ -283,6 +283,7 @@ async fn purge_removes_target_group_and_leaves_other_group_untouched() {
         conn.insert_entity(&b1).unwrap();
 
         let edge_a = lcg_core::types::RelatesToEdge {
+            ingested_at: String::new(),
             uuid: Uuid::new_v4().to_string(),
             name: "KNOWS".to_string(),
             source_node_uuid: a1.uuid.clone(),

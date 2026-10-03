@@ -75,6 +75,12 @@ pub struct EntityRow {
     pub kind: String,
     /// LadybugDB TIMESTAMP as "YYYY-MM-DD HH:MM:SS".
     pub created_at: String,
+    /// Service-clock time the record was first written (issue #673, ADR-0673) — the "knowledge
+    /// time" clock, distinct from the caller-supplied event time in `created_at`/`valid_at`. Never
+    /// caller-supplied: the `Conn::insert_*` helpers stamp it when empty. Same read-back format as
+    /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
+    #[serde(default)]
+    pub ingested_at: String,
     #[serde(skip)]
     pub name_embedding: Vec<f32>,
     pub summary: String,
@@ -96,6 +102,7 @@ impl Default for EntityRow {
             labels: Vec::new(),
             kind: default_kind(),
             created_at: String::new(),
+            ingested_at: String::new(),
             name_embedding: Vec::new(),
             summary: String::new(),
             attributes: String::new(),
@@ -141,6 +148,12 @@ pub struct EpisodicRow {
     #[serde(skip)]
     pub content_embedding: Vec<f32>,
     pub valid_at: String,
+    /// Service-clock time the record was first written (issue #673, ADR-0673) — the "knowledge
+    /// time" clock, distinct from the caller-supplied event time in `created_at`/`valid_at`. Never
+    /// caller-supplied: the `Conn::insert_*` helpers stamp it when empty. Same read-back format as
+    /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
+    #[serde(default)]
+    pub ingested_at: String,
     pub entity_edges: Vec<String>,
     /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.
     /// The write path (`episode::add_episode`) and the migration/WAL-rebuild zero-fill
@@ -165,6 +178,12 @@ pub struct RelatesToEdge {
     #[serde(skip)]
     pub fact_embedding: Vec<f32>,
     pub created_at: String,
+    /// Service-clock time the record was first written (issue #673, ADR-0673) — the "knowledge
+    /// time" clock, distinct from the caller-supplied event time in `created_at`/`valid_at`. Never
+    /// caller-supplied: the `Conn::insert_*` helpers stamp it when empty. Same read-back format as
+    /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
+    #[serde(default)]
+    pub ingested_at: String,
     pub valid_at: Option<String>,
     pub invalid_at: Option<String>,
     pub attributes: String,

@@ -2988,6 +2988,12 @@ async fn handle_rebuild_from_wal(
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
                     // Persists the outcome to SchemaState too, not just the in-process flag.
                     crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+                    // `ingested_at` (issue #673): replay of a legacy WAL leaves it NULL. Backfill from the
+                    // WAL's own creating-line timestamps, falling back to `created_at` (FR-007).
+                    crate::schema::backfill_ingested_at_and_record_status(
+                        &conn,
+                        std::slice::from_ref(&wal_dir_c),
+                    );
                     // Snapshot this rebuild's own backfill outcome now, synchronously and on the
                     // same thread, before build_indices_and_constraints (or anything else) can
                     // touch the same in-process flag (issue #491 FR-002).
@@ -3468,6 +3474,12 @@ async fn handle_rebuild_from_wal(
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
                     // Persists the outcome to SchemaState too, not just the in-process flag.
                     crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+                    // `ingested_at` (issue #673): replay of a legacy WAL leaves it NULL. Backfill from the
+                    // WAL's own creating-line timestamps, falling back to `created_at` (FR-007).
+                    crate::schema::backfill_ingested_at_and_record_status(
+                        &conn,
+                        std::slice::from_ref(&wal_dir_c),
+                    );
                     // Snapshot this rebuild's own backfill outcome now, synchronously and on the
                     // same thread, before build_indices_and_constraints (or anything else) can
                     // touch the same in-process flag (issue #491 FR-002).
@@ -4346,6 +4358,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let row = EntityRow {
+                    ingested_at: String::new(),
                     uuid: Uuid::new_v4().to_string(),
                     name: name2,
                     group_id: group_id2,
@@ -4673,6 +4686,7 @@ async fn handle_assert_relationship(
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let edge = RelatesToEdge {
+                    ingested_at: String::new(),
                     uuid: Uuid::new_v4().to_string(),
                     name: predicate2,
                     source_node_uuid: source_uuid2,
@@ -5334,7 +5348,7 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
     let embedding_dim = state.embedder.dim();
 
     let result = match strategy.as_str() {
-        "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
+        "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim, wal_root.clone()).await,
         "rebuild_from_workspace_wal" => {
             let wal_root =
                 wal_root.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
@@ -5358,7 +5372,9 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             )
             .await
         }
-        "restore_from_backup" => recover_restore_from_backup(&db_path, embedding_dim).await,
+        "restore_from_backup" => {
+            recover_restore_from_backup(&db_path, embedding_dim, wal_root.clone()).await
+        }
         other => return Err(Error::Ipc(format!("Unknown strategy: {other}"))),
     };
 
@@ -5530,6 +5546,7 @@ async fn handle_knowledge_recover_full(
 async fn recover_drop_lbug_wal(
     db_path: &str,
     embedding_dim: usize,
+    wal_root: Option<std::path::PathBuf>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
@@ -5576,6 +5593,11 @@ async fn recover_drop_lbug_wal(
             // query error here shouldn't fail an otherwise-successful recovery. Persists the
             // outcome to SchemaState too, not just the in-process flag.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): a checkpoint that predates the column is backfilled
+            // from the WAL tree's creating-line timestamps; a no-op once marked complete.
+            if let Some(root) = wal_root.as_deref() {
+                crate::schema::ensure_ingested_at_backfill(&conn, &crate::schema::group_wal_dirs(root));
+            }
             // This strategy's whole premise is reopening an already-indexed checkpoint (see
             // the file-existence guard above), which holds for HNSW/FTS on any checkpoint that
             // has ever completed a normal startup — but a checkpoint predating issue #221 has
@@ -5704,6 +5726,11 @@ async fn recover_rebuild_from_workspace_wal(
             // column (issue #221 FR-006). Persists the outcome to SchemaState too, not just the
             // in-process flag.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): every replayed legacy row has it NULL.
+            crate::schema::backfill_ingested_at_and_record_status(
+                &conn,
+                &crate::schema::group_wal_dirs(&wal_root),
+            );
             conn.build_indices_and_constraints()?;
         }
         Ok(RecoverOutcome {
@@ -5717,6 +5744,7 @@ async fn recover_rebuild_from_workspace_wal(
 async fn recover_restore_from_backup(
     db_path: &str,
     embedding_dim: usize,
+    wal_root: Option<std::path::PathBuf>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
@@ -5767,6 +5795,11 @@ async fn recover_restore_from_backup(
             // transient backfill query error here shouldn't fail an otherwise-successful
             // recovery. Persists the outcome to SchemaState too, not just the in-process flag.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): a backup that predates the column is backfilled from
+            // the WAL tree's creating-line timestamps; a no-op once marked complete.
+            if let Some(root) = wal_root.as_deref() {
+                crate::schema::ensure_ingested_at_backfill(&conn, &crate::schema::group_wal_dirs(root));
+            }
             // See recover_drop_lbug_wal's identical comment: a backup predating issue #221
             // never had entity_lookup_key_idx built, and this call is idempotent.
             if let Err(e) = conn.create_entity_lookup_key_index() {

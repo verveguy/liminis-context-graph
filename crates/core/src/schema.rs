@@ -30,6 +30,12 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // entity (default `Entity`), part of `lookup_key`'s composition
     // (`group_id ␟ kind ␟ lower(name)`). Graphiti-shaped reads/writes never mention it, so they
     // are unaffected (FR-013).
+    // `ingested_at` (issue #673, ADR-0673) is a fourth documented divergence from graphiti's
+    // kuzu_driver.py schema, additive like the three above and present on exactly `Entity`,
+    // `Episodic` and `RelatesToNode_`: the service-clock time the record was first written
+    // ("knowledge time"), kept separately from the caller-supplied event time that feeds
+    // `created_at`/`valid_at`. Nullable, so graphiti-shaped statements that never mention it
+    // still bind; legacy rows are filled by `ensure_ingested_at_backfill`.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -42,7 +48,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          attributes STRING, \
          summary_embedding FLOAT[{dim}], \
          lookup_key STRING, \
-         kind STRING\
+         kind STRING, \
+         ingested_at TIMESTAMP\
          )"
     ))?;
     // `attributes` (issue #528) is a deliberate divergence from graphiti's kuzu_driver.py
@@ -63,7 +70,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          content_embedding FLOAT[{dim}], \
          valid_at TIMESTAMP, \
          entity_edges STRING[], \
-         attributes STRING\
+         attributes STRING, \
+         ingested_at TIMESTAMP\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -79,7 +87,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          valid_at TIMESTAMP, \
          invalid_at TIMESTAMP, \
          attributes STRING, \
-         relation_type STRING\
+         relation_type STRING, \
+         ingested_at TIMESTAMP\
          )"
     ))?;
     // Stub tables for graphiti's community/saga subsystem (not implemented in liminis-graph;
@@ -337,6 +346,23 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
     // below for how the persisted marker closes that gap without reintroducing an O(N) `Entity`
     // scan on the clean (already-migrated) startup path.
     ensure_lookup_key_backfill(conn);
+    // Entity/Episodic/RelatesToNode_ gained `ingested_at` (issue #673). Probe first — lbug
+    // corrupts its hash index if `ALTER TABLE ADD` runs on an existing column. The value backfill
+    // is `ensure_ingested_at_backfill` (it needs the WAL dir, which `migrate` does not have).
+    for table in ["Entity", "Episodic", "RelatesToNode_"] {
+        if conn
+            .raw_query(&format!(
+                "MATCH (n:{table}) WHERE n.uuid = '_probe_' RETURN n.ingested_at LIMIT 0"
+            ))
+            .is_err()
+        {
+            if let Err(e) =
+                conn.raw_query(&format!("ALTER TABLE {table} ADD ingested_at TIMESTAMP"))
+            {
+                eprintln!("liminis-context-graph: schema migrate: ALTER TABLE {table} ADD ingested_at TIMESTAMP: {e} (non-fatal)");
+            }
+        }
+    }
     // Seed the known-kinds registry (issue #615) from the migrated data, so broad name
     // resolution probes every kind an existing database holds from the first request.
     conn.refresh_known_kinds();
@@ -447,6 +473,174 @@ pub fn backfill_entity_lookup_keys(conn: &Conn<'_>) -> Result<(), Error> {
     }
     conn.refresh_known_kinds();
     Ok(())
+}
+
+/// `SchemaState` key recording that the `ingested_at` upgrade backfill (issue #673) has run to
+/// completion against this database. See [`ensure_ingested_at_backfill`].
+pub(crate) const INGESTED_AT_BACKFILL_STATE_KEY: &str = "ingested_at_backfill_v1";
+
+/// The node tables that carry `ingested_at`, with the label a WAL `CREATE` names them by.
+const INGESTED_AT_TABLES: [&str; 3] = ["Entity", "Episodic", "RelatesToNode_"];
+
+/// If `cypher` is a *native creating* statement for one of the [`INGESTED_AT_TABLES`], returns
+/// that table. "Native" is deliberate: it is the only shape whose WAL `ts` means "when the
+/// service first wrote this record" — `Conn::insert_*`'s bound `CREATE (:Label {…})`, or the
+/// legacy graphiti-era `MERGE (n:Label {uuid: $uuid}) ON CREATE SET …`. The dump/compaction
+/// templates are `MERGE … SET` and are stamped with the *compaction* time, which says nothing
+/// about when anything was learned, so they are never a creating line (records whose only WAL
+/// trace is a dump line take the `created_at` fallback).
+fn creating_table(cypher: &str) -> Option<&'static str> {
+    let c = cypher.trim_start();
+    INGESTED_AT_TABLES.into_iter().find(|label| {
+        c.starts_with(&format!("CREATE (:{label} {{"))
+            || (c.starts_with("MERGE (")
+                && c.contains(&format!(":{label} {{uuid: $uuid}})"))
+                && c.contains("ON CREATE SET"))
+    })
+}
+
+/// WAL pass of the `ingested_at` backfill (issue #673, FR-007 signal 1): for every record whose
+/// `ingested_at` is still NULL, sets it to the `ts` of the earliest WAL line that natively
+/// created it. Streams the WAL files once, in first-`seq` order (so the first creating line
+/// wins), and writes one `IS NULL`-guarded point update per creating line — memory stays O(1)
+/// and a re-run is a no-op. Lines that already bind `$ingested_at` carry their own value through
+/// replay and are skipped. Unrecorded: marker/derived state must not reach the WAL.
+fn backfill_ingested_at_from_wal(conn: &Conn<'_>, wal_dir: &std::path::Path) -> Result<(), Error> {
+    use std::io::BufRead;
+    if !wal_dir.is_dir() {
+        return Ok(());
+    }
+    let mut files: Vec<(Option<u64>, std::path::PathBuf)> = std::fs::read_dir(wal_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .map(|p| (crate::wal::first_seq_in_file(&p), p))
+        .collect();
+    files.sort_by(|(sa, pa), (sb, pb)| match (sa, sb) {
+        (Some(a), Some(b)) => a.cmp(b).then_with(|| pa.file_name().cmp(&pb.file_name())),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => pa.file_name().cmp(&pb.file_name()),
+    });
+    for (_, path) in files {
+        let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                // A line that is not valid UTF-8 (a torn write) has already been consumed: skip
+                // just that line. Stopping here would still return `Ok`, the caller would record
+                // the marker `complete`, and every later creating line in this file would take
+                // the approximate `created_at` fallback with no retry.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                // A genuine read failure: surface it so the status is recorded `failed` and the
+                // backfill is retried on the next open.
+                Err(e) => return Err(e.into()),
+            };
+            // Cheap pre-filter before paying for a JSON parse of a (possibly vector-bearing) line.
+            if !line.contains("\"cypher\"")
+                || !(line.contains("CREATE (:") || line.contains("ON CREATE SET"))
+            {
+                continue;
+            }
+            let Ok(wl) = serde_json::from_str::<crate::wal::WalLine>(&line) else {
+                continue;
+            };
+            let Some(table) = creating_table(&wl.cypher) else {
+                continue;
+            };
+            if wl.cypher.contains("$ingested_at") {
+                continue;
+            }
+            let Some(uuid) = wl.params.get("uuid").and_then(|u| u.as_str()) else {
+                continue;
+            };
+            // `ts` is `%Y-%m-%dT%H:%M:%S%.6f+00:00`; `ingested_at` is a TIMESTAMP_PARAM_NAMES
+            // name, so it binds as a typed Timestamp.
+            conn.exec_params_unrecorded(
+                &format!(
+                    "MATCH (n:{table} {{uuid: $uuid}}) WHERE n.ingested_at IS NULL \
+                     SET n.ingested_at = $ingested_at"
+                ),
+                serde_json::json!({ "uuid": uuid, "ingested_at": wl.ts }),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Backfills `ingested_at` on every Entity/Episodic/RelatesToNode_ row where it is NULL (issue
+/// #673, FR-007), in precedence order: (1) the WAL `ts` of the line that created the record, when
+/// `wal_dirs` are given; (2) the record's own `created_at`. Idempotent (every step is guarded by
+/// `ingested_at IS NULL`), so rows that already carry an ingest time are never touched.
+///
+/// Values from (2) are *approximate*: for records written before this feature `created_at` was
+/// the caller-supplied event time, not the ingest time. Documented in `docs/ipc-mcp-reference.md`.
+pub fn backfill_ingested_at(conn: &Conn<'_>, wal_dirs: &[std::path::PathBuf]) -> Result<(), Error> {
+    for dir in wal_dirs {
+        backfill_ingested_at_from_wal(conn, dir)?;
+    }
+    for table in INGESTED_AT_TABLES {
+        conn.exec_params_unrecorded(
+            &format!(
+                "MATCH (n:{table}) WHERE n.ingested_at IS NULL AND n.created_at IS NOT NULL \
+                 SET n.ingested_at = n.created_at"
+            ),
+            serde_json::json!({}),
+        )?;
+    }
+    Ok(())
+}
+
+/// Runs [`backfill_ingested_at`] and persists the outcome to `SchemaState`. Unconditional (no
+/// marker check): the entry point for every WAL-rebuild/recovery site, because replaying a legacy
+/// WAL creates NULL-`ingested_at` rows *after* an earlier `"complete"` marker was written, exactly
+/// like `lookup_key` (see [`backfill_entity_lookup_keys_and_record_status`]). Non-fatal.
+pub(crate) fn backfill_ingested_at_and_record_status(
+    conn: &Conn<'_>,
+    wal_dirs: &[std::path::PathBuf],
+) {
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: ingested_at backfill: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+    let status = match backfill_ingested_at(conn, wal_dirs) {
+        Ok(()) => "complete",
+        Err(e) => {
+            eprintln!("liminis-context-graph: backfill ingested_at (non-fatal): {e}");
+            "failed"
+        }
+    };
+    if let Err(e) = set_schema_state_status(conn, INGESTED_AT_BACKFILL_STATE_KEY, status) {
+        eprintln!(
+            "liminis-context-graph: record ingested_at backfill status in SchemaState (non-fatal): {e}"
+        );
+    }
+}
+
+/// Upgrade-path entry point (issue #673): backfills `ingested_at` once for a database that
+/// predates the column. A persisted `"complete"` marker makes every later open an O(1) point
+/// lookup; no marker, or `"failed"`, runs the backfill. Needs the group's WAL dir for the
+/// preferred signal, which `migrate()` does not have — so it is called right after `init_schema`
+/// at each open site that does (`Db::open_or_rebuild`, service startup). An empty `wal_dirs` is a
+/// no-op rather than a `created_at`-only pass, so the WAL signal is not lost to a site that
+/// cannot see it; a later call with a WAL dir still does the full job.
+pub fn ensure_ingested_at_backfill(conn: &Conn<'_>, wal_dirs: &[std::path::PathBuf]) {
+    if wal_dirs.is_empty() {
+        return;
+    }
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: ingested_at backfill: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+    match schema_state_status(conn, INGESTED_AT_BACKFILL_STATE_KEY) {
+        Ok(Some(status)) if status == "complete" => {}
+        Ok(_) => backfill_ingested_at_and_record_status(conn, wal_dirs),
+        Err(e) => eprintln!(
+            "liminis-context-graph: read SchemaState for ingested_at backfill (non-fatal): {e}"
+        ),
+    }
 }
 
 /// Key under which the `lookup_key` backfill's completion state is persisted in `SchemaState`
@@ -935,4 +1129,13 @@ mod fts_marker_tests {
         let recorded = conn.drain_mutations();
         assert!(recorded.is_empty(), "unexpected WAL entries: {recorded:?}");
     }
+}
+
+/// Every per-group WAL directory under `wal_root` — the `wal_dirs` argument for the
+/// `ingested_at` backfill at sites that rebuild or reopen the whole embedded DB (which holds
+/// every group's records, not just the default group's).
+pub fn group_wal_dirs(wal_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    crate::wal_group::list_group_wal_dirs(wal_root)
+        .map(|v| v.into_iter().map(|(_, d)| d).collect())
+        .unwrap_or_default()
 }

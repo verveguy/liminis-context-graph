@@ -580,6 +580,7 @@ fn apply_same_as(
 
                 // Create replacement edge on canonical
                 let new_edge = RelatesToEdge {
+                    ingested_at: old_edge.ingested_at.clone(),
                     uuid: Uuid::new_v4().to_string(),
                     name: old_edge.name.clone(),
                     source_node_uuid: new_src,
@@ -957,6 +958,7 @@ fn merge_entities_inner(
 
         if !dry_run {
             let new_edge = RelatesToEdge {
+                ingested_at: old_edge.ingested_at.clone(),
                 uuid: Uuid::new_v4().to_string(),
                 name: old_edge.name.clone(),
                 source_node_uuid: new_src,

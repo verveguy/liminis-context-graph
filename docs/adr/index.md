@@ -144,6 +144,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
 | [0666](0666-exact-graph-match-and-uuid-self-loop-guard.md) | Exact Graph Match Before Salvage, UUID-Level Self-Loop Guard, Short-Code Veto | 2026-10-02 |
 | [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
+| [0673](0673-ingest-time-separate-from-event-time.md) | Ingest Time Is Stored Separately From Event Time (`ingested_at`) | 2026-10-03 |
 
 ## Historical numbering
 

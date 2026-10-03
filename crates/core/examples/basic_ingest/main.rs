@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         conn.insert_episodic(&EpisodicRow {
+            ingested_at: String::new(),
             uuid: "ep-0".to_string(),
             name: "Team intro".to_string(),
             group_id: "demo".to_string(),

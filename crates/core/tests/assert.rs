@@ -461,6 +461,7 @@ async fn assert_relationship_edge_upsert_never_crosses_groups() {
         // Pre-seed a "layer-x"-scoped edge between the same two UUIDs, same predicate — this
         // must survive untouched by an assert into a different group_id.
         conn.insert_relates_to_edge(&RelatesToEdge {
+            ingested_at: String::new(),
             uuid: "layer-edge-fr016".to_string(),
             name: "KNOWS".to_string(),
             source_node_uuid: "alice-fr016".to_string(),
